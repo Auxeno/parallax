@@ -1,0 +1,55 @@
+[project]
+name = "parallax-api"
+dynamic = ["version"]
+description = "A flexible JAX RL API."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "Alex Goddard"}]
+
+dependencies = [
+    "jax>=0.5.0",
+    "jaxtyping>=0.3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/auxeno/parallax"
+Repository = "https://github.com/auxeno/parallax"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["parallax"]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pyright",
+    "ruff",
+    "ipykernel",
+    "pip",
+]
+
+[tool.ruff]
+src = ["."]
+line-length=100
+extend-include = ["*.ipynb"]
+
+[tool.ruff.lint]
+ignore = ["F722", "E731"]
+
+[tool.pyright]
+include = ["parallax", "tests"]
+typeCheckingMode = "standard"
+reportIncompatibleMethodOverride = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+filterwarnings = [
+    # From Optax
+    "ignore:Setting `jax_pmap_shmap_merge`:DeprecationWarning",
+]
