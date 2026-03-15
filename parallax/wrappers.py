@@ -24,12 +24,13 @@ class VmapWrapper:
             return jax.vmap(self.env.reset)(key=key)
         keys = jax.random.split(key, done.shape[0])
         new_state, new_timestep = jax.vmap(self.env.reset)(key=keys)
-        out_state: EnvState = jax.tree.map(
-            lambda n, o: jnp.where(done, n, o), new_state, state
-        )
-        out_timestep: Timestep = jax.tree.map(
-            lambda n, o: jnp.where(done, n, o), new_timestep, timestep
-        )
+
+        def _select(n, o):
+            mask = done.reshape(-1, *([1] * (n.ndim - done.ndim)))
+            return jnp.where(mask, n, o)
+
+        out_state: EnvState = jax.tree.map(_select, new_state, state)
+        out_timestep: Timestep = jax.tree.map(_select, new_timestep, timestep)
         return out_state, out_timestep
 
     def step(self, state: EnvState, action: Array) -> tuple[EnvState, Timestep]:

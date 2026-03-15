@@ -32,7 +32,10 @@ class Box:
 @dataclass
 class MultiDiscrete:
     actions_per_dim: Int[Array, "..."]
-    shape: tuple[int, ...]
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return (self.actions_per_dim.shape[0],)
 
     def sample(self, *, key: PRNGKeyArray) -> Array:
         keys = jax.random.split(key, self.actions_per_dim.shape[0])
