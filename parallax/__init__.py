@@ -1,7 +1,7 @@
 from .env import Env
 from .spaces import Box, Discrete, MultiBinary, MultiDiscrete, PyTreeSpace, Space
 from .struct import EnvState, Timestep
-from .wrappers import TimeLimit, VmapWrapper
+from .wrappers import AutoResetWrapper, TimeLimit, VmapWrapper
 
 __all__ = [
     "Env",
@@ -13,6 +13,7 @@ __all__ = [
     "MultiDiscrete",
     "MultiBinary",
     "PyTreeSpace",
+    "AutoResetWrapper",
     "VmapWrapper",
     "TimeLimit",
 ]

@@ -37,6 +37,25 @@ class VmapWrapper:
         return jax.vmap(self.env.step)(state, action)
 
 
+class AutoResetWrapper:
+    def __init__(self, env: Env):
+        self.env = env
+        self.action_space = env.action_space
+        self.observation_space = env.observation_space
+
+    def reset(self, *, key: PRNGKeyArray) -> tuple[EnvState, Timestep]:
+        return self.env.reset(key=key)
+
+    def step(self, state: EnvState, action: Array) -> tuple[EnvState, Timestep]:
+        state, timestep = self.env.step(state, action)
+        done = jnp.any(timestep.termination | timestep.truncation)
+        key, reset_key = jax.random.split(state.key)
+        reset_state, reset_timestep = self.env.reset(key=reset_key)
+        state = jax.tree.map(lambda r, s: jnp.where(done, r, s), reset_state, state)
+        timestep = jax.tree.map(lambda r, t: jnp.where(done, r, t), reset_timestep, timestep)
+        return state, timestep
+
+
 class TimeLimit:
     def __init__(self, env: Env, max_steps: int):
         self.env = env

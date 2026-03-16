@@ -13,7 +13,7 @@ class EnvState:
     step: Int[Array, ""]
     """Current timestep count."""
 
-    key: PRNGKeyArray | None
+    key: PRNGKeyArray
     """RNG key used in environment."""
 
 

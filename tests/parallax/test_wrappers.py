@@ -1,4 +1,4 @@
-"""Tests for VmapWrapper and TimeLimit wrappers."""
+"""Tests for VmapWrapper, AutoResetWrapper, and TimeLimit wrappers."""
 
 import jax
 import jax.numpy as jnp
@@ -7,7 +7,7 @@ import jax.tree_util as jtu
 from conftest import assert_trees_close, assert_trees_equal
 from parallax.spaces import Box, Discrete
 from parallax.struct import EnvState, Timestep
-from parallax.wrappers import TimeLimit, VmapWrapper
+from parallax.wrappers import AutoResetWrapper, TimeLimit, VmapWrapper
 
 
 class _ScalarEnv:
@@ -187,6 +187,93 @@ class TestVmapWrapper:
         )(reset_key)
         assert new_states.step[0] == 0
         assert new_states.step[1] == 1
+
+
+class TestAutoResetWrapper:
+    def test_resets_on_termination(self):
+        """State and timestep are reset when the episode terminates."""
+        env = AutoResetWrapper(_ScalarEnv())
+        state, ts = env.reset(key=jax.random.key(0))
+        action = jnp.int32(0)
+        for _ in range(10):
+            state, ts = env.step(state, action)
+        assert state.step == 0
+        assert not ts.termination
+
+    def test_no_reset_before_done(self):
+        """State progresses normally when the episode is not done."""
+        env = AutoResetWrapper(_ScalarEnv())
+        state, ts = env.reset(key=jax.random.key(0))
+        action = jnp.int32(0)
+        for i in range(1, 5):
+            state, ts = env.step(state, action)
+            assert state.step == i
+            assert not ts.termination
+
+    def test_resets_on_truncation(self):
+        """State and timestep are reset when the episode is truncated."""
+        env = AutoResetWrapper(TimeLimit(_ScalarEnv(), max_steps=3))
+        state, ts = env.reset(key=jax.random.key(0))
+        action = jnp.int32(0)
+        for _ in range(3):
+            state, ts = env.step(state, action)
+        assert state.step == 0
+        assert not ts.truncation
+
+    def test_continues_after_reset(self):
+        """Environment keeps running across episode boundaries."""
+        env = AutoResetWrapper(_ScalarEnv())
+        state, ts = env.reset(key=jax.random.key(0))
+        action = jnp.int32(0)
+        for _ in range(10):
+            state, ts = env.step(state, action)
+        assert state.step == 0
+        state, ts = env.step(state, action)
+        assert state.step == 1
+
+    def test_forwards_spaces(self):
+        base = _ScalarEnv()
+        env = AutoResetWrapper(base)
+        assert env.action_space is base.action_space
+        assert env.observation_space is base.observation_space
+
+    def test_jit_compatible(self):
+        env = AutoResetWrapper(_ScalarEnv())
+        state, ts = jax.jit(env.reset)(key=jax.random.key(0))
+        s1, ts1 = env.step(state, jnp.int32(0))
+        s2, ts2 = jax.jit(env.step)(state, jnp.int32(0))
+        assert_trees_close(s1, s2)
+        assert_trees_close(ts1, ts2)
+
+    def test_composable_with_vmap(self):
+        """AutoResetWrapper + VmapWrapper compose correctly."""
+        env = VmapWrapper(AutoResetWrapper(_ScalarEnv()))
+        keys = jax.random.split(jax.random.key(0), 4)
+        states, ts = env.reset(key=keys)
+        actions = jnp.zeros(4, dtype=jnp.int32)
+        for _ in range(10):
+            states, ts = env.step(states, actions)
+        assert jnp.all(states.step == 0)
+
+    def test_composable_with_timelimit(self):
+        """AutoResetWrapper + TimeLimit + VmapWrapper compose correctly."""
+        env = VmapWrapper(AutoResetWrapper(TimeLimit(_ScalarEnv(), max_steps=3)))
+        keys = jax.random.split(jax.random.key(0), 4)
+        states, ts = env.reset(key=keys)
+        actions = jnp.zeros(4, dtype=jnp.int32)
+        for _ in range(3):
+            states, ts = env.step(states, actions)
+        assert jnp.all(states.step == 0)
+
+    def test_reset_delegates(self):
+        """AutoResetWrapper.reset produces same output as base env.reset."""
+        base = _ScalarEnv()
+        env = AutoResetWrapper(base)
+        key = jax.random.key(0)
+        base_s, base_ts = base.reset(key=key)
+        env_s, env_ts = env.reset(key=key)
+        assert_trees_equal(base_s, env_s)
+        assert_trees_equal(base_ts, env_ts)
 
 
 class TestTimeLimit:

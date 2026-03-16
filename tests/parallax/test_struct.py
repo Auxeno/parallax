@@ -23,24 +23,23 @@ class TestEnvState:
         npt.assert_array_equal(reconstructed.step, state.step)
 
     def test_tree_map(self):
-        # Use key=None to avoid arithmetic on PRNGKey leaves
-        state = EnvState(state=jnp.float32(1.0), step=jnp.int32(2), key=None)
-        doubled = jax.tree.map(lambda x: x * 2, state)
-        npt.assert_allclose(doubled.state, 2.0)
-        npt.assert_array_equal(doubled.step, 4)
+        state = EnvState(state=jnp.float32(1.0), step=jnp.int32(2), key=jax.random.key(0))
+        mapped = jax.tree.map(lambda x: x, state)
+        assert isinstance(mapped, EnvState)
+        npt.assert_allclose(mapped.state, 1.0)
+        npt.assert_array_equal(mapped.step, 2)
 
     def test_nested_state(self):
         """EnvState.state can be a nested pytree."""
         nested = {"pos": jnp.zeros(2), "vel": jnp.ones(3)}
-        state = EnvState(state=nested, step=jnp.int32(0), key=None)
+        state = EnvState(state=nested, step=jnp.int32(0), key=jax.random.key(0))
         leaves = jtu.tree_leaves(state)
-        # pos(2 elems) + vel(3 elems) + step = at least 3 leaves
-        assert len(leaves) >= 3
+        # pos(2 elems) + vel(3 elems) + step + key = at least 4 leaves
+        assert len(leaves) >= 4
 
     def test_jit_compatible(self):
-        # Use key=None to avoid arithmetic on PRNGKey leaves
-        state = EnvState(state=jnp.float32(1.0), step=jnp.int32(0), key=None)
-        result = jax.jit(lambda s: jax.tree.map(lambda x: x + 1, s))(state)
+        state = EnvState(state=jnp.float32(1.0), step=jnp.int32(0), key=jax.random.key(0))
+        result = jax.jit(lambda s: EnvState(state=s.state + 1, step=s.step + 1, key=s.key))(state)
         npt.assert_allclose(result.state, 2.0)
 
     def test_vmap_compatible(self):
@@ -52,13 +51,11 @@ class TestEnvState:
         result = jax.vmap(lambda s: EnvState(state=s.state + 1, step=s.step, key=s.key))(states)
         npt.assert_allclose(result.state, jnp.ones(4))
 
-    def test_none_key(self):
-        """EnvState supports key=None."""
-        state = EnvState(state=jnp.float32(0.0), step=jnp.int32(0), key=None)
-        assert state.key is None
-        # Should still be a valid pytree
+    def test_key_is_pytree_leaf(self):
+        """EnvState.key is included in pytree leaves."""
+        state = EnvState(state=jnp.float32(0.0), step=jnp.int32(0), key=jax.random.key(42))
         leaves = jtu.tree_leaves(state)
-        assert len(leaves) >= 1
+        assert len(leaves) == 3
 
 
 class TestTimestep:

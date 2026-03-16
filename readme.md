@@ -11,22 +11,32 @@
 
 ---
 
-Parallax is a minimal JAX reinforcement learning API for SARL and MARL environments. It defines a protocol - not a framework - so you can adapt it to your problem rather than adapting your problem to it.
+Parallax is a minimal reinforcement learning protocol for JAX. It defines a shared contract for environment `reset` and `step`, not a framework or base class, so any environment can expose the same interface while packaging whatever data its agents actually need.
 
-- **Protocol-based**: satisfy the interface, no inheritance required
-- **JAX-native**: pure functions, pytree states, `jit`/`vmap` just work
-- **SARL and MARL**: same API, agents are just a batch dimension
-- **Flexible observations**: flat arrays, dicts, named tuples, graphs with masks, anything that's a pytree
+## The Problem
+
+Every JAX RL library defines its own environment interface. Gymnax, Jumanji, Brax, and PureJaxRL all have their own state types, timestep types, and step signatures. Training code written for one doesn't transfer to another without adapter layers.
+
+MARL makes this worse. Different problems need action masks, visibility masks, team rewards, per-agent rewards, or structured observations, but the underlying loop is always the same: reset, observe, act, step, repeat. The variation is in *what data the environment provides*, not in *how the loop works*.
+
+## How Parallax Solves This
+
+Parallax keeps the `reset`/`step` contract fixed and minimal. The base `Timestep` carries the fields every RL loop needs. When an environment needs more, it extends `Timestep` with new fields. An environment with action masking adds an `action_mask` field; a partially observable environment adds a `visibility` field. Agents access these directly as `timestep.action_mask` or `timestep.visibility`.
+
+- **Protocol, not a framework**: satisfy the interface, no inheritance required
+- **JAX-native**: pure functions, pytree states, `jit`/`vmap`/`grad` just work
+- **SARL and MARL**: same interface, agents are a batch dimension
+- **Extensible timesteps**: add fields as your environment needs them
 
 ## Install
 
 ```bash
-pip install parallax-api
+pip install parallax-rl
 ```
 
-## API
+## The Protocol
 
-### Protocol
+### Env
 
 ```python
 class Env(Protocol):
@@ -37,25 +47,42 @@ class Env(Protocol):
     def step(self, state: EnvState, action: Array) -> tuple[EnvState, Timestep]: ...
 ```
 
-### Core Types
+Any class with these methods and properties satisfies the protocol. No base class, no registration.
+
+### EnvState
 
 ```python
 @dataclass
 class EnvState:
-    state: PyTree          # your environment's internal state
-    step: Int[Array, ""]   # current timestep count
-    key: PRNGKeyArray | None  # RNG key (None if env is deterministic)
-
-@dataclass
-class Timestep:
-    observation: Float[Array, "..."] | PyTree  # what the agent sees
-    reward: Float[Array, "..."]     # reward signal
-    termination: Bool[Array, "..."] # natural episode end
-    truncation: Bool[Array, "..."]  # forced episode end (e.g. time limit)
-    info: PyTree                    # auxiliary data, logs, metrics
+    state: PyTree
+    step: Int[Array, ""]
+    key: PRNGKeyArray
 ```
 
-Both are registered as JAX pytrees.
+`state` holds your environment's internal state as any pytree. `step` tracks the current timestep count. `key` carries the RNG key.
+
+### Timestep
+
+```python
+@dataclass
+class Timestep:
+    observation: Float[Array, "..."] | PyTree
+    reward: Float[Array, "..."]
+    termination: Bool[Array, "..."]
+    truncation: Bool[Array, "..."]
+    info: PyTree
+```
+
+Both `EnvState` and `Timestep` are registered as JAX pytrees. When your environment needs to provide more data, extend `Timestep`:
+
+```python
+@jax.tree_util.register_dataclass
+@dataclass
+class MaskedTimestep(Timestep):
+    action_mask: Bool[Array, "..."]
+```
+
+Your agent accesses `timestep.action_mask` directly. The `reset`/`step` signatures stay the same.
 
 ### Spaces
 
@@ -63,36 +90,34 @@ Both are registered as JAX pytrees.
 |-------|-------------|
 | `Discrete(n, shape=())` | Integer(s) in `[0, n)`, pass `shape` for batched sampling |
 | `Box(low, high, shape)` | Continuous values in `[low, high]` |
-| `MultiDiscrete(actions_per_dim)` | Vector of independent discrete values (shape derived from `actions_per_dim`) |
+| `MultiDiscrete(actions_per_dim)` | Vector of independent discrete values |
 | `MultiBinary(n)` | Binary vector of length `n` |
-| `PyTreeSpace(spaces)` | Pytree of spaces - for structured observations |
+| `PyTreeSpace(spaces)` | Pytree of spaces, for structured observations |
 
-All spaces implement `sample(key)` for random sampling.
+All spaces implement `sample(*, key)` for random sampling.
 
-## Example
+## Examples
+
+### Single-Agent
 
 ```python
 import jax
 import jax.numpy as jnp
 from dataclasses import dataclass
-from parallax import Env, EnvState, Timestep, Discrete, Box
+from parallax import EnvState, Timestep, Discrete, Box
 
 @jax.tree_util.register_dataclass
 @dataclass
 class GridState:
-    pos: jnp.ndarray  # (2,) agent position
+    pos: jnp.ndarray
 
 class GridWorld:
-    action_space = Discrete(4)         # up/down/left/right
+    action_space = Discrete(4)
     observation_space = Box(0.0, 1.0, (5, 5))
 
     def reset(self, *, key):
         pos = jax.random.randint(key, (2,), 0, 5)
-        state = EnvState(
-            state=GridState(pos=pos),
-            step=jnp.array(0),
-            key=key,
-        )
+        state = EnvState(state=GridState(pos=pos), step=jnp.array(0), key=key)
         obs = jnp.zeros((5, 5)).at[pos[0], pos[1]].set(1.0)
         return state, Timestep(obs, jnp.float32(0), jnp.False_, jnp.False_, {})
 
@@ -109,76 +134,72 @@ class GridWorld:
         return new_state, Timestep(obs, at_goal.astype(jnp.float32), at_goal, jnp.False_, {})
 ```
 
-## MARL
+### Multi-Agent
 
-Same protocol. Agents are a dimension on your arrays. Reward, termination, and truncation have shape `(num_agents,)`:
+For MARL, agents are a dimension on your arrays. Reward, termination, and truncation have shape `(num_agents,)` for per-agent signals, or remain scalar for shared team rewards. The `step` and `reset` signatures don't change.
+
+### Action Masking
+
+Extend `Timestep` with an `action_mask` field. The agent accesses it directly.
 
 ```python
-import jax.numpy as jnp
-from parallax import MultiDiscrete, Box
+@jax.tree_util.register_dataclass
+@dataclass
+class MaskedTimestep(Timestep):
+    action_mask: Bool[Array, "num_actions"]
 
-num_agents = 3
-
-class MultiAgentEnv:
-    action_space = MultiDiscrete(jnp.full(num_agents, 5))
-    observation_space = Box(0.0, 1.0, (num_agents, 4))
-
-    def reset(self, *, key):
-        # observation: (num_agents, 4)
-        # reward: (num_agents,), termination: (num_agents,), truncation: (num_agents,)
-        ...
+class MaskedActionEnv:
+    action_space = Discrete(9)
+    observation_space = Box(0.0, 1.0, (3, 3))
 
     def step(self, state, action):
-        # action: (num_agents,)
         ...
+        return new_state, MaskedTimestep(
+            observation=board_state,
+            reward=jnp.float32(reward),
+            termination=jnp.bool_(done),
+            truncation=jnp.False_,
+            info={},
+            action_mask=legal_moves,
+        )
 ```
-
-Spaces reflect the full shape including the agent dimension. `jax.vmap` over the env axis for batched environments, over the agent axis for per-agent logic - compose as needed.
-
-## Structured Observations
-
-For graph-structured or entity-based observations, use `PyTreeSpace`:
 
 ```python
-from parallax import PyTreeSpace, Box, MultiBinary
-
-observation_space = PyTreeSpace({
-    "nodes": Box(0.0, 1.0, (num_nodes, node_features)),
-    "edges": Box(0.0, 1.0, (num_edges, edge_features)),
-    "action_mask": MultiBinary(num_actions),
-    "edge_mask": MultiBinary(num_edges),
-})
-
-# sample() returns a dict with the same structure
-obs = observation_space.sample(key=key)
+logits = policy_network(timestep.observation)
+masked_logits = jnp.where(timestep.action_mask, logits, -1e9)
+action = jax.random.categorical(key, masked_logits)
 ```
+
+The same pattern works for visibility masks, communication channels, global state for a centralised critic, or anything else. Extend `Timestep`, access the field.
 
 ## Wrappers
 
-### VmapWrapper
+### AutoResetWrapper
 
-Vectorises an environment over a batch dimension. Pass `done` to selectively reset only finished environments.
+Automatically resets done environments after each step. Use this when you don't need to handle truncation separately or bootstrap from terminal observations.
 
 ```python
-from parallax import VmapWrapper
+from parallax import AutoResetWrapper, TimeLimit, VmapWrapper
 
-env = VmapWrapper(GridWorld())
-
-# full reset: pass (num_envs, 2) keys
+env = VmapWrapper(AutoResetWrapper(TimeLimit(GridWorld(), max_steps=200)))
 keys = jax.random.split(jax.random.key(0), 128)
 state, timestep = env.reset(key=keys)
-
-# step: batched
 state, timestep = env.step(state, actions)
+```
 
-# reset only done envs (after you've handled bootstrapping)
+If you need the terminal observation before it gets overwritten (e.g. for value bootstrapping), use `VmapWrapper` directly and reset manually:
+
+```python
+env = VmapWrapper(TimeLimit(GridWorld(), max_steps=200))
+
+state, timestep = env.step(state, actions)
 done = timestep.termination | timestep.truncation
-state, timestep = env.reset(key=jax.random.key(1), state=state, timestep=timestep, done=done)
+state, timestep = env.reset(key=reset_key, state=state, timestep=timestep, done=done)
 ```
 
 ### TimeLimit
 
-Sets truncation after a fixed number of steps. Relies on the env incrementing `state.step` each step.
+Sets truncation after a fixed number of steps.
 
 ```python
 from parallax import TimeLimit
@@ -186,50 +207,16 @@ from parallax import TimeLimit
 env = TimeLimit(GridWorld(), max_steps=200)
 ```
 
-Compose them:
-
-```python
-env = VmapWrapper(TimeLimit(GridWorld(), max_steps=200))
-```
-
-## Training Loop
-
-```python
-env = VmapWrapper(TimeLimit(GridWorld(), max_steps=200))
-num_envs = 128
-
-@jax.jit
-def train_step(state, timestep, key):
-    action_key, reset_key = jax.random.split(key)
-
-    # your policy here
-    actions = jax.vmap(env.action_space.sample)(key=jax.random.split(action_key, num_envs))
-
-    # step
-    state, timestep = env.step(state, actions)
-
-    # bootstrap value estimates from the *current* observation before resetting,
-    # since reset will overwrite observations for done envs
-    done = timestep.termination | timestep.truncation
-    # v_bootstrap = jax.vmap(value_fn)(timestep.observation)
-
-    # reset done envs
-    state, timestep = env.reset(key=reset_key, state=state, timestep=timestep, done=done)
-    return state, timestep
-```
-
 ## Scope
 
-Parallax assumes fixed-shape tensors, simultaneous actions, and a pure functional step. This fits:
+Parallax assumes fixed-shape tensors, simultaneous actions, and a pure functional step. This covers:
 
 - Single-agent RL
 - Simultaneous-move MARL (PettingZoo `parallel_env` style)
-- Turn-based games (chess, Go), one `step` per move, opponent is part of the environment
-- Differentiable environments (`jax.grad` through `step`)
-- Model-based RL, a learned dynamics model has the same signature
-- Structured and masked observations via pytrees
+- Turn-based games where one `step` is one move and the opponent is part of the environment
+- Differentiable environments and model-based RL
 
 It does not naturally fit:
 
-- **AEC**, where multiple agents act sequentially within a round and observe each other's intermediate actions (e.g. poker, auctions, negotiation games)
-- **Variable agent counts**, JAX requires fixed shapes so agents entering or leaving requires padding and masking
+- **AEC**, where agents act sequentially within a round and observe each other's intermediate actions
+- **Variable action space sizes across steps** (changing which actions are legal is fine via masking, but changing the dimension itself requires padding)
