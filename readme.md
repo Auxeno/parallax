@@ -34,6 +34,21 @@ Parallax keeps the `reset`/`step` contract fixed and minimal. The base `Timestep
 pip install parallax-rl
 ```
 
+## Usage
+
+```python
+env = GridWorld()
+state, timestep = env.reset(key=jax.random.key(0))
+
+done = False
+total_reward = 0.0
+while not done:
+    action = policy(timestep.observation)
+    state, timestep = env.step(state, action)
+    total_reward += timestep.reward
+    done = timestep.termination | timestep.truncation
+```
+
 ## The Protocol
 
 ### Env
