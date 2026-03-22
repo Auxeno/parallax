@@ -139,6 +139,104 @@ done = timestep.termination | timestep.truncation
 state, timestep = env.reset(key=reset_key, state=state, timestep=timestep, done=done)
 ```
 
+## Training
+
+Collect rollouts with `jax.lax.scan`. With manual resets you keep terminal observations for value bootstrapping. With `AutoResetWrapper` the loop is simpler.
+
+### Manual Reset
+
+```python
+import jax
+import jax.numpy as jnp
+from dataclasses import dataclass
+from parallax import VmapWrapper, TimeLimit
+
+@jax.tree_util.register_dataclass
+@dataclass
+class Experience:
+    observation: jax.Array
+    next_observation: jax.Array
+    action: jax.Array
+    reward: jax.Array
+    termination: jax.Array
+    truncation: jax.Array
+
+num_envs = 128
+num_steps = 256
+env = VmapWrapper(TimeLimit(GridWorld(), max_steps=200))
+
+key = jax.random.key(0)
+key, reset_key = jax.random.split(key)
+state, timestep = env.reset(key=jax.random.split(reset_key, num_envs))
+obs = timestep.observation
+
+def step_fn(carry, _):
+    state, obs, key = carry
+    key, action_key, reset_key = jax.random.split(key, 3)
+    action = jax.vmap(env.action_space.sample)(key=jax.random.split(action_key, num_envs))
+
+    state, timestep = env.step(state, action)
+    done = timestep.termination | timestep.truncation
+
+    experience = Experience(
+        observation=obs,
+        next_observation=timestep.observation,
+        action=action,
+        reward=timestep.reward,
+        termination=timestep.termination,
+        truncation=timestep.truncation,
+    )
+
+    state, timestep = env.reset(key=reset_key, state=state, timestep=timestep, done=done)
+    obs = timestep.observation
+
+    return (state, obs, key), experience
+
+(state, obs, key), experiences = jax.lax.scan(step_fn, (state, obs, key), None, length=num_steps)
+# experiences: Experience with shape (num_steps, num_envs, ...)
+```
+
+### With AutoReset
+
+```python
+from parallax import AutoResetWrapper
+
+@jax.tree_util.register_dataclass
+@dataclass
+class Experience:
+    observation: jax.Array
+    action: jax.Array
+    reward: jax.Array
+    termination: jax.Array
+
+env = VmapWrapper(AutoResetWrapper(TimeLimit(GridWorld(), max_steps=200)))
+
+key = jax.random.key(0)
+key, reset_key = jax.random.split(key)
+state, timestep = env.reset(key=jax.random.split(reset_key, num_envs))
+obs = timestep.observation
+
+def step_fn(carry, _):
+    state, obs, key = carry
+    key, action_key = jax.random.split(key)
+    action = jax.vmap(env.action_space.sample)(key=jax.random.split(action_key, num_envs))
+
+    state, timestep = env.step(state, action)
+
+    experience = Experience(
+        observation=obs,
+        action=action,
+        reward=timestep.reward,
+        termination=timestep.termination,
+    )
+    obs = timestep.observation
+
+    return (state, obs, key), experience
+
+(state, obs, key), experiences = jax.lax.scan(step_fn, (state, obs, key), None, length=num_steps)
+# experiences: Experience with shape (num_steps, num_envs, ...)
+```
+
 ## Scope
 
 Parallax assumes fixed-shape tensors, simultaneous actions, and a pure functional step. This covers single-agent RL, simultaneous-move MARL, turn-based games, and differentiable environments.
