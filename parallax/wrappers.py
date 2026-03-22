@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, PRNGKeyArray
@@ -69,11 +71,5 @@ class TimeLimit:
     def step(self, state: EnvState, action: Array) -> tuple[EnvState, Timestep]:
         state, timestep = self.env.step(state, action)
         truncation = timestep.truncation | (state.step >= self.max_steps)
-        timestep = Timestep(
-            observation=timestep.observation,
-            reward=timestep.reward,
-            termination=timestep.termination,
-            truncation=truncation,
-            info=timestep.info,
-        )
+        timestep = replace(timestep, truncation=truncation)
         return state, timestep

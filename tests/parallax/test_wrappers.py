@@ -315,7 +315,7 @@ class TestTimeLimit:
         assert not ts.truncation
 
     def test_truncation_or_semantics(self):
-        """Truncation uses OR — existing truncation from base env is preserved."""
+        """Truncation uses OR: existing truncation from base env is preserved."""
         env = TimeLimit(_ScalarEnv(), max_steps=50)
         state, _ = env.reset(key=jax.random.key(0))
         state, ts = env.step(state, jnp.int32(0))
