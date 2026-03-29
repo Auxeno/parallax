@@ -144,6 +144,28 @@ state = env.step(state, actions)
 state = env.reset(key=reset_key, state=state, done=state.done)
 ```
 
+## Adapters
+
+Use existing JAX RL environments with Parallax via adapters:
+
+```python
+import gymnax
+from parallax.adapters import GymnaxAdapter
+
+env = GymnaxAdapter(gymnax.make("CartPole-v1")[0])
+env = VmapWrapper(env, num_envs=128)
+```
+
+```python
+import brax.envs
+from parallax.adapters import BraxAdapter
+
+env = BraxAdapter(brax.envs.get_environment("ant"))
+env = VmapWrapper(env, num_envs=128)
+```
+
+Adapters map foreign reset/step APIs to the Parallax protocol. Brax's built-in auto-reset is stripped automatically to preserve terminal observations.
+
 ## Custom Properties
 
 Subclass `State` to add extra fields. For example, adding an action mask to `GridWorld`:
