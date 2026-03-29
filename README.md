@@ -11,21 +11,14 @@
 
 ---
 
-Parallax is a protocol for JAX RL environments. It defines a shared `reset`/`step` contract, not a framework or base class, so any environment can expose the same interface while carrying whatever data its agents actually need.
+## Why Parallax?
 
-## Why
+JAX RL environments need pure functions and immutable state, but there's no standard for what that looks like. Parallax defines a minimal `reset`/`step` contract so any environment exposes the same interface.
 
-Every JAX RL library defines its own environment interface. Gymnax, Jumanji, Brax, PureJaxRL all have their own state types, timestep types, and step signatures. Training code written for one doesn't transfer to another without adapter layers.
+- **For JAX RL users**: Write agents, experience collection, and training loops once. Swap environments without changing your code.
+- **For Gymnasium users**: The same familiar concepts (reset, step, observation, reward) rebuilt for JAX. Pure functions instead of mutable objects, so everything works with `jit`, `vmap`, and `scan`.
 
-The underlying loop is always the same: reset, observe, act, step, repeat. The variation is in *what data the environment provides*, not in *how the loop works*.
-
-Parallax fixes the contract and leaves the data flexible. The base `Timestep` carries the fields every RL loop needs. When an environment needs more, it extends `Timestep` with new fields. The `reset`/`step` signatures stay the same.
-
-- **Protocol, not a framework.** Satisfy the interface, no inheritance required.
-- **JAX-native.** Pure functions, pytree states, `jit`/`vmap`/`grad` just work.
-- **SARL and MARL.** Same interface, agents are a batch dimension.
-- **Extensible timesteps.** Subclass `Timestep` to carry any additional data.
-- **Gymnasium-style spaces.** `Discrete`, `Box`, `MultiDiscrete`, `MultiBinary`, `PyTreeSpace`.
+Protocol, not a framework. No base class, no registration.
 
 ## Install
 
@@ -33,123 +26,141 @@ Parallax fixes the contract and leaves the data flexible. The base `Timestep` ca
 pip install parallax-rl
 ```
 
-```python
-import parallax
-```
-
-## The Protocol
+## Quick Start
 
 ```python
-class Env(Protocol):
-    action_space: Space
-    observation_space: Space
+import jax
 
-    def reset(self, *, key: PRNGKeyArray) -> tuple[EnvState, Timestep]: ...
-    def step(self, state: EnvState, action: Array) -> tuple[EnvState, Timestep]: ...
+env = GridWorld()
+state = env.reset(key=jax.random.key(0))
+
+for _ in range(200):
+    action = agent(state.observation)
+    state = env.step(state, action)
+
+    if state.done:
+        break
 ```
 
-Any class with these methods and properties satisfies the protocol. No base class, no registration.
+## How It Works
+
+Traditional RL environments are stateful. Calling `env.step()` mutates the environment in place. JAX needs pure functions and immutable data, so Parallax splits things in two:
+
+**Env** is stateless. A collection of pure functions (`reset`, `step`, `observation`, `reward`, ...) with no internal state.
+
+**State** is a JAX pytree that holds all the data. It gets passed into and returned from env functions.
 
 ```python
-@dataclass
-class EnvState:
-    state: PyTree          # your environment's internal state
-    step: Int[Array, ""]   # current timestep count
-    key: PRNGKeyArray      # RNG key
+state = env.reset(key=jax.random.key(0))
+state = env.step(state, action)
 
-@dataclass
-class Timestep:
-    observation: Float[Array, "..."] | PyTree
-    reward: Float[Array, "..."]
-    termination: Bool[Array, "..."]
-    truncation: Bool[Array, "..."]
-    info: PyTree
+state.observation  # what the agent sees
+state.reward       # scalar reward
+state.termination  # episode ended naturally
+state.truncation   # episode was cut short
+state.done         # termination | truncation
+state.info         # extra metadata
 ```
 
-Both are registered as JAX pytrees.
+Properties are computed lazily. Accessing `state.reward` calls `env.reward(state)` under the hood. If you never read a property, the computation doesn't happen.
 
-## Example
+## Building an Environment
+
+Implement `reset` and `step` for dynamics, plus property methods for what agents observe:
 
 ```python
 import jax
 import jax.numpy as jnp
-from dataclasses import dataclass
-from parallax import EnvState, Timestep, spaces
+from typing import NamedTuple
+from jaxtyping import Array, Bool, Float, PRNGKeyArray
+from parallax import Space, State, spaces
 
-@jax.tree_util.register_dataclass
-@dataclass
-class GridState:
-    pos: jnp.ndarray
+
+class GridState(NamedTuple):
+    pos: Array
+    goal: Array
+
 
 class GridWorld:
-    action_space = spaces.Discrete(4)
-    observation_space = spaces.Box(0.0, 1.0, (5, 5))
+    action_space: Space = spaces.Discrete(4)
+    observation_space: Space = spaces.Box(0.0, 4.0, (4,))
 
-    def reset(self, *, key):
-        pos = jax.random.randint(key, (2,), 0, 5)
-        state = EnvState(state=GridState(pos=pos), step=jnp.array(0), key=key)
-        obs = jnp.zeros((5, 5)).at[pos[0], pos[1]].set(1.0)
-        return state, Timestep(obs, jnp.float32(0), jnp.False_, jnp.False_, {})
+    def reset(self, *, key: PRNGKeyArray) -> State:
+        key, goal_key = jax.random.split(key)
+        pos = jnp.zeros(2, dtype=jnp.float32)
+        goal = jax.random.randint(goal_key, (2,), minval=1, maxval=5).astype(jnp.float32)
+        return State(self, env_state=GridState(pos=pos, goal=goal), step_count=jnp.int32(0), key=key)
 
-    def step(self, state, action):
-        moves = jnp.array([[0, 1], [0, -1], [1, 0], [-1, 0]])
-        new_pos = jnp.clip(state.state.pos + moves[action], 0, 4)
-        at_goal = jnp.all(new_pos == jnp.array([4, 4]))
-        new_state = EnvState(
-            state=GridState(pos=new_pos),
-            step=state.step + 1,
-            key=state.key,
-        )
-        obs = jnp.zeros((5, 5)).at[new_pos[0], new_pos[1]].set(1.0)
-        return new_state, Timestep(obs, at_goal.astype(jnp.float32), at_goal, jnp.False_, {})
+    def step(self, state: State, action: Array) -> State:
+        moves = jnp.array([[0, 1], [0, -1], [1, 0], [-1, 0]], dtype=jnp.float32)
+        pos = jnp.clip(state.env_state.pos + moves[action], 0.0, 4.0)
+        env_state = state.env_state._replace(pos=pos)
+        return State(self, env_state=env_state, step_count=state.step_count + 1, key=state.key)
+
+    def observation(self, state: State) -> Float[Array, "4"]:
+        return jnp.concatenate([state.env_state.pos, state.env_state.goal])
+
+    def reward(self, state: State) -> Float[Array, ""]:
+        return jnp.exp(-jnp.linalg.norm(state.env_state.pos - state.env_state.goal))
+
+    def termination(self, state: State) -> Bool[Array, ""]:
+        return jnp.all(state.env_state.pos == state.env_state.goal)
+
+    def truncation(self, state: State) -> Bool[Array, ""]:
+        return jnp.bool_(False)
+
+    def info(self, state: State) -> dict:
+        return {}
 ```
 
-### Extending Timestep
+`env_state` is your raw environment data and can be any JAX pytree. Property methods like `observation` and `reward` derive what the agent sees from that internal state.
 
-When your environment needs to provide more data, subclass `Timestep`:
-
-```python
-@jax.tree_util.register_dataclass
-@dataclass
-class MaskedTimestep(Timestep):
-    action_mask: Bool[Array, "num_actions"]
-```
-
-Your agent accesses `timestep.action_mask` directly. The same pattern works for visibility masks, communication channels, global state for a centralised critic, or anything else.
-
-### Multi-Agent
-
-For MARL, agents are a dimension on your arrays. Reward, termination, and truncation have shape `(num_agents,)` for per-agent signals, or remain scalar for shared team rewards. The `step` and `reset` signatures don't change.
+For multi-agent environments, agents are a dimension on your arrays. Reward, termination, and truncation become shape `(num_agents,)` while the method signatures stay the same. Environments where agents have different action space sizes will need padding and masking to maintain fixed array shapes. This is a JAX constraint (need for fixed shapes) rather than a Parallax one.
 
 ## Wrappers
+
+Wrappers compose to add functionality:
 
 ```python
 from parallax import AutoResetWrapper, TimeLimit, VmapWrapper
 
-# Auto-reset on done, with a step limit, across 128 parallel envs
+num_envs = 128
 env = VmapWrapper(AutoResetWrapper(TimeLimit(GridWorld(), max_steps=200)))
-keys = jax.random.split(jax.random.key(0), 128)
-state, timestep = env.reset(key=keys)
-state, timestep = env.step(state, actions)
-
-# Manual reset when you need terminal observations (e.g. value bootstrapping)
-env = VmapWrapper(TimeLimit(GridWorld(), max_steps=200))
-state, timestep = env.step(state, actions)
-done = timestep.termination | timestep.truncation
-state, timestep = env.reset(key=reset_key, state=state, timestep=timestep, done=done)
+keys = jax.random.split(jax.random.key(0), num_envs)
+state = env.reset(key=keys)
+state = env.step(state, actions)
 ```
 
-## Training
-
-Collect rollouts with `jax.lax.scan`. With manual resets you keep terminal observations for value bootstrapping. With `AutoResetWrapper` the loop is simpler.
-
-### Manual Reset
+For manual resets (e.g. when you need terminal observations for value bootstrapping):
 
 ```python
-import jax
-import jax.numpy as jnp
+env = VmapWrapper(TimeLimit(GridWorld(), max_steps=200))
+state = env.step(state, actions)
+state = env.reset(key=reset_key, state=state, done=state.done)
+```
+
+## Custom Properties
+
+Any method on your env is accessible as a property on the state. This works the same way as the built-in properties like `observation` and `reward`:
+
+```python
+class MaskedGridWorld(GridWorld):
+    def action_mask(self, state: State) -> Bool[Array, "4"]:
+        pos = state.env_state.pos
+        return jnp.array([pos[1] < 4, pos[1] > 0, pos[0] < 4, pos[0] > 0])
+
+state.action_mask  # calls env.action_mask(state)
+```
+
+Custom properties forward through wrappers automatically, including `VmapWrapper`.
+
+## Collecting Experience
+
+Use `jax.lax.scan` for vectorized rollouts. Manual resets let you capture terminal observations before resetting done environments, which is needed for value bootstrapping:
+
+```python
 from dataclasses import dataclass
-from parallax import VmapWrapper, TimeLimit
+from parallax import VmapWrapper
 
 @jax.tree_util.register_dataclass
 @dataclass
@@ -159,86 +170,36 @@ class Experience:
     action: jax.Array
     reward: jax.Array
     termination: jax.Array
-    truncation: jax.Array
-
+    
 num_envs = 128
-num_steps = 256
-env = VmapWrapper(TimeLimit(GridWorld(), max_steps=200))
+env = VmapWrapper(GridWorld())
 
 key = jax.random.key(0)
 key, reset_key = jax.random.split(key)
-state, timestep = env.reset(key=jax.random.split(reset_key, num_envs))
-obs = timestep.observation
+state = env.reset(key=jax.random.split(reset_key, num_envs))
+obs = state.observation
 
 def step_fn(carry, _):
     state, obs, key = carry
     key, action_key, reset_key = jax.random.split(key, 3)
     action = jax.vmap(env.action_space.sample)(key=jax.random.split(action_key, num_envs))
 
-    state, timestep = env.step(state, action)
-    done = timestep.termination | timestep.truncation
+    state = env.step(state, action)
+    next_obs = state.observation
 
     experience = Experience(
         observation=obs,
-        next_observation=timestep.observation,
+        next_observation=next_obs,
         action=action,
-        reward=timestep.reward,
-        termination=timestep.termination,
-        truncation=timestep.truncation,
+        reward=state.reward,
+        termination=state.termination,
     )
 
-    state, timestep = env.reset(key=reset_key, state=state, timestep=timestep, done=done)
-    obs = timestep.observation
+    # Reset environments where done, terminal obs captured above
+    state = env.reset(key=jax.random.split(reset_key, num_envs), state=state, done=state.done)
+    obs = state.observation
 
     return (state, obs, key), experience
 
-(state, obs, key), experiences = jax.lax.scan(step_fn, (state, obs, key), None, length=num_steps)
-# experiences: Experience with shape (num_steps, num_envs, ...)
+(state, obs, key), experiences = jax.lax.scan(step_fn, (state, obs, key), None, length=256)
 ```
-
-### With AutoReset
-
-```python
-from parallax import AutoResetWrapper
-
-@jax.tree_util.register_dataclass
-@dataclass
-class Experience:
-    observation: jax.Array
-    action: jax.Array
-    reward: jax.Array
-    termination: jax.Array
-
-env = VmapWrapper(AutoResetWrapper(TimeLimit(GridWorld(), max_steps=200)))
-
-key = jax.random.key(0)
-key, reset_key = jax.random.split(key)
-state, timestep = env.reset(key=jax.random.split(reset_key, num_envs))
-obs = timestep.observation
-
-def step_fn(carry, _):
-    state, obs, key = carry
-    key, action_key = jax.random.split(key)
-    action = jax.vmap(env.action_space.sample)(key=jax.random.split(action_key, num_envs))
-
-    state, timestep = env.step(state, action)
-
-    experience = Experience(
-        observation=obs,
-        action=action,
-        reward=timestep.reward,
-        termination=timestep.termination,
-    )
-    obs = timestep.observation
-
-    return (state, obs, key), experience
-
-(state, obs, key), experiences = jax.lax.scan(step_fn, (state, obs, key), None, length=num_steps)
-# experiences: Experience with shape (num_steps, num_envs, ...)
-```
-
-## Scope
-
-Parallax assumes fixed-shape tensors, simultaneous actions, and a pure functional step. This covers single-agent RL, simultaneous-move MARL, turn-based games, and differentiable environments.
-
-It is not a good fit for AEC (sequential agent actions within a round) or variable-dimension action spaces across steps (masking is fine, changing the shape requires padding).

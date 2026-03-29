@@ -1,16 +1,15 @@
 from . import spaces
-from .env import Env
+from .core import Env, State
 from .spaces import Space
-from .struct import EnvState, Timestep
-from .wrappers import AutoResetWrapper, TimeLimit, VmapWrapper
+from .wrappers import AutoResetWrapper, TimeLimit, VmapWrapper, Wrapper
 
 __all__ = [
     "Env",
-    "EnvState",
-    "Timestep",
+    "State",
     "Space",
     "spaces",
     "AutoResetWrapper",
     "VmapWrapper",
     "TimeLimit",
+    "Wrapper",
 ]
