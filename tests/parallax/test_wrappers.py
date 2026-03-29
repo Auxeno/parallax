@@ -1,5 +1,7 @@
 """Tests for VmapWrapper, AutoResetWrapper, and TimeLimit wrappers."""
 
+from dataclasses import dataclass
+
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -16,27 +18,31 @@ class _ScalarEnv:
     action_space = Discrete(2)
     observation_space = Box(low=0.0, high=100.0, shape=())
 
-    def observation(self, state):
-        return state.env_state.astype(jnp.float32)
-
-    def reward(self, state):
-        return jnp.where(state.step_count > 0, jnp.float32(1.0), jnp.float32(0.0))
-
-    def termination(self, state):
-        return state.env_state >= 10.0
-
-    def truncation(self, state):
-        return jnp.bool_(False)
-
-    def info(self, state):
-        return {}
-
     def reset(self, *, key):
-        return State(self, env_state=jnp.float32(0.0), step_count=jnp.int32(0), key=key)
+        return State(
+            env_state=jnp.float32(0.0),
+            observation=jnp.float32(0.0),
+            reward=jnp.float32(0.0),
+            termination=jnp.bool_(False),
+            truncation=jnp.bool_(False),
+            info={},
+            step_count=jnp.int32(0),
+            key=key,
+        )
 
     def step(self, state, action):
-        count = state.env_state + 1.0
-        return State(self, env_state=count, step_count=state.step_count + 1, key=state.key)
+        env_state = state.env_state + 1.0
+        step_count = state.step_count + 1
+        return State(
+            env_state=env_state,
+            observation=env_state.astype(jnp.float32),
+            reward=jnp.where(step_count > 0, jnp.float32(1.0), jnp.float32(0.0)),
+            termination=env_state >= 10.0,
+            truncation=jnp.bool_(False),
+            info={},
+            step_count=step_count,
+            key=state.key,
+        )
 
 
 class _VectorEnv:
@@ -45,44 +51,45 @@ class _VectorEnv:
     action_space = Discrete(4)
     observation_space = Box(low=0.0, high=4.0, shape=(2,))
 
-    def observation(self, state):
-        return state.env_state
-
-    def reward(self, state):
-        at_goal = jnp.all(state.env_state == jnp.array([4.0, 4.0]))
-        return jnp.where(at_goal, 1.0, 0.0)
-
-    def termination(self, state):
-        return jnp.all(state.env_state == jnp.array([4.0, 4.0]))
-
-    def truncation(self, state):
-        return jnp.bool_(False)
-
-    def info(self, state):
-        return {}
-
     def reset(self, *, key):
         pos = jnp.zeros(2, dtype=jnp.float32)
-        return State(self, env_state=pos, step_count=jnp.int32(0), key=key)
+        return State(
+            env_state=pos,
+            observation=pos,
+            reward=jnp.float32(0.0),
+            termination=jnp.bool_(False),
+            truncation=jnp.bool_(False),
+            info={},
+            step_count=jnp.int32(0),
+            key=key,
+        )
 
     def step(self, state, action):
         moves = jnp.array([[0, 1], [1, 0], [0, -1], [-1, 0]], dtype=jnp.float32)
-        new_pos = jnp.clip(state.env_state + moves[action], 0.0, 4.0)
-        return State(self, env_state=new_pos, step_count=state.step_count + 1, key=state.key)
+        pos = jnp.clip(state.env_state + moves[action], 0.0, 4.0)
+        at_goal = jnp.all(pos == jnp.array([4.0, 4.0]))
+        return State(
+            env_state=pos,
+            observation=pos,
+            reward=jnp.where(at_goal, 1.0, 0.0),
+            termination=at_goal,
+            truncation=jnp.bool_(False),
+            info={},
+            step_count=state.step_count + 1,
+            key=state.key,
+        )
 
 
 class TestVmapWrapper:
     def test_batched_reset(self):
-        env = VmapWrapper(_ScalarEnv())
-        keys = jax.random.split(jax.random.key(0), 4)
-        state = env.reset(key=keys)
+        env = VmapWrapper(_ScalarEnv(), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
         for leaf in jtu.tree_leaves(state):
             assert leaf.shape[0] == 4
 
     def test_batched_step(self):
-        env = VmapWrapper(_ScalarEnv())
-        keys = jax.random.split(jax.random.key(0), 4)
-        state = env.reset(key=keys)
+        env = VmapWrapper(_ScalarEnv(), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
         actions = jnp.zeros(4, dtype=jnp.int32)
         new_state = env.step(state, actions)
         for leaf in jtu.tree_leaves(new_state):
@@ -90,9 +97,8 @@ class TestVmapWrapper:
 
     def test_selective_reset_scalar_state(self):
         """Selective reset only resets envs where done=True (scalar state)."""
-        env = VmapWrapper(_ScalarEnv())
-        keys = jax.random.split(jax.random.key(0), 4)
-        state = env.reset(key=keys)
+        env = VmapWrapper(_ScalarEnv(), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
 
         actions = jnp.zeros(4, dtype=jnp.int32)
         state = env.step(state, actions)
@@ -107,9 +113,8 @@ class TestVmapWrapper:
 
     def test_selective_reset_vector_state(self):
         """Selective reset with vector-valued state (tests jnp.where broadcasting)."""
-        env = VmapWrapper(_VectorEnv())
-        keys = jax.random.split(jax.random.key(0), 4)
-        state = env.reset(key=keys)
+        env = VmapWrapper(_VectorEnv(), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
 
         actions = jnp.array([1, 1, 1, 1], dtype=jnp.int32)
         state = env.step(state, actions)
@@ -124,9 +129,8 @@ class TestVmapWrapper:
 
     def test_selective_reset_preserves_non_done(self):
         """Selective reset only updates fields for done envs."""
-        env = VmapWrapper(_ScalarEnv())
-        keys = jax.random.split(jax.random.key(0), 4)
-        state = env.reset(key=keys)
+        env = VmapWrapper(_ScalarEnv(), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
 
         actions = jnp.zeros(4, dtype=jnp.int32)
         state = env.step(state, actions)
@@ -140,21 +144,20 @@ class TestVmapWrapper:
 
     def test_forwards_spaces(self):
         base = _ScalarEnv()
-        env = VmapWrapper(base)
+        env = VmapWrapper(base, num_envs=4)
         assert env.action_space is base.action_space
         assert env.observation_space is base.observation_space
 
     def test_jit_reset(self):
-        env = VmapWrapper(_ScalarEnv())
-        keys = jax.random.split(jax.random.key(0), 4)
-        s1 = env.reset(key=keys)
-        s2 = jax.jit(env.reset)(key=keys)
+        env = VmapWrapper(_ScalarEnv(), num_envs=4)
+        key = jax.random.key(0)
+        s1 = env.reset(key=key)
+        s2 = jax.jit(env.reset)(key=key)
         assert_trees_close(s1, s2)
 
     def test_jit_step(self):
-        env = VmapWrapper(_ScalarEnv())
-        keys = jax.random.split(jax.random.key(0), 4)
-        state = env.reset(key=keys)
+        env = VmapWrapper(_ScalarEnv(), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
         actions = jnp.zeros(4, dtype=jnp.int32)
         s1 = env.step(state, actions)
         s2 = jax.jit(env.step)(state, actions)
@@ -162,9 +165,8 @@ class TestVmapWrapper:
 
     def test_jit_selective_reset(self):
         """Selective reset works under jax.jit."""
-        env = VmapWrapper(_VectorEnv())
-        keys = jax.random.split(jax.random.key(0), 4)
-        state = env.reset(key=keys)
+        env = VmapWrapper(_VectorEnv(), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
         actions = jnp.array([1, 1, 1, 1], dtype=jnp.int32)
         state = env.step(state, actions)
 
@@ -174,11 +176,10 @@ class TestVmapWrapper:
         assert new_state.step_count[0] == 0
         assert new_state.step_count[1] == 1
 
-    def test_lazy_properties_batched(self):
-        """Lazy properties work on batched state from VmapWrapper."""
-        env = VmapWrapper(_ScalarEnv())
-        keys = jax.random.split(jax.random.key(0), 4)
-        state = env.reset(key=keys)
+    def test_properties_batched(self):
+        """Precomputed properties are batched after VmapWrapper."""
+        env = VmapWrapper(_ScalarEnv(), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
         state = env.step(state, jnp.zeros(4, dtype=jnp.int32))
         assert state.observation.shape == (4,)
         assert state.reward.shape == (4,)
@@ -242,9 +243,8 @@ class TestAutoResetWrapper:
 
     def test_composable_with_vmap(self):
         """AutoResetWrapper + VmapWrapper compose correctly."""
-        env = VmapWrapper(AutoResetWrapper(_ScalarEnv()))
-        keys = jax.random.split(jax.random.key(0), 4)
-        state = env.reset(key=keys)
+        env = VmapWrapper(AutoResetWrapper(_ScalarEnv()), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
         actions = jnp.zeros(4, dtype=jnp.int32)
         for _ in range(10):
             state = env.step(state, actions)
@@ -252,9 +252,8 @@ class TestAutoResetWrapper:
 
     def test_composable_with_timelimit(self):
         """AutoResetWrapper + TimeLimit + VmapWrapper compose correctly."""
-        env = VmapWrapper(AutoResetWrapper(TimeLimit(_ScalarEnv(), max_steps=3)))
-        keys = jax.random.split(jax.random.key(0), 4)
-        state = env.reset(key=keys)
+        env = VmapWrapper(AutoResetWrapper(TimeLimit(_ScalarEnv(), max_steps=3)), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
         actions = jnp.zeros(4, dtype=jnp.int32)
         for _ in range(3):
             state = env.step(state, actions)
@@ -368,49 +367,45 @@ class TestTimeLimit:
 
     def test_composable_with_vmap(self):
         """TimeLimit + VmapWrapper compose correctly."""
-        env = VmapWrapper(TimeLimit(_ScalarEnv(), max_steps=3))
-        keys = jax.random.split(jax.random.key(0), 4)
-        state = env.reset(key=keys)
+        env = VmapWrapper(TimeLimit(_ScalarEnv(), max_steps=3), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
         actions = jnp.zeros(4, dtype=jnp.int32)
         for _ in range(3):
             state = env.step(state, actions)
         assert jnp.all(state.truncation)
 
 
-class _CustomPropEnv(_ScalarEnv):
-    """Env with a custom property method for testing __getattr__ forwarding."""
+class TestSubclassedState:
+    """Subclassed State with extra fields works through wrappers."""
 
-    def action_mask(self, state):
-        return jnp.array([True, state.env_state < 5.0])
+    @jax.tree_util.register_dataclass
+    @dataclass
+    class _MaskedState(State):
+        action_mask: jax.Array
 
+    class _MaskedEnv(_ScalarEnv):
+        def reset(self, *, key):
+            s = _ScalarEnv.reset(self, key=key)
+            return TestSubclassedState._MaskedState(
+                **{f.name: getattr(s, f.name) for f in s.__dataclass_fields__.values()},
+                action_mask=jnp.array([True, True]),
+            )
 
-class TestCustomPropertyForwarding:
-    def test_through_wrapper(self):
-        """Custom env method accessible via state through a Wrapper."""
-        from parallax.wrappers import Wrapper
-
-        env = Wrapper(_CustomPropEnv())
-        state = env.reset(key=jax.random.key(0))
-        assert state.action_mask.shape == (2,)
-
-    def test_through_timelimit(self):
-        """Custom env method forwards through TimeLimit wrapper."""
-        env = TimeLimit(_CustomPropEnv(), max_steps=10)
-        state = env.reset(key=jax.random.key(0))
-        assert state.action_mask.shape == (2,)
+        def step(self, state, action):
+            s = _ScalarEnv.step(self, state, action)
+            return TestSubclassedState._MaskedState(
+                **{f.name: getattr(s, f.name) for f in s.__dataclass_fields__.values()},
+                action_mask=jnp.array([True, s.env_state < 5.0]),
+            )
 
     def test_through_vmap(self):
-        """Custom env method is auto-vmapped through VmapWrapper."""
-        env = VmapWrapper(_CustomPropEnv())
-        keys = jax.random.split(jax.random.key(0), 4)
-        state = env.reset(key=keys)
-        mask = state.action_mask
-        assert mask.shape == (4, 2)
+        env = VmapWrapper(self._MaskedEnv(), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
+        state = env.step(state, jnp.zeros(4, dtype=jnp.int32))
+        assert state.action_mask.shape == (4, 2)  # type: ignore[attr-defined]
 
     def test_through_wrapper_stack(self):
-        """Custom env method forwards through a full wrapper stack."""
-        env = VmapWrapper(TimeLimit(_CustomPropEnv(), max_steps=10))
-        keys = jax.random.split(jax.random.key(0), 4)
-        state = env.reset(key=keys)
-        mask = state.action_mask
-        assert mask.shape == (4, 2)
+        env = VmapWrapper(TimeLimit(self._MaskedEnv(), max_steps=10), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
+        state = env.step(state, jnp.zeros(4, dtype=jnp.int32))
+        assert state.action_mask.shape == (4, 2)  # type: ignore[attr-defined]

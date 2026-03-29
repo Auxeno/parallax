@@ -1,7 +1,7 @@
 [project]
 name = "parallax-rl"
 dynamic = ["version"]
-description = "A flexible JAX RL API."
+description = "A flexible JAX RL protocol."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"

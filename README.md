@@ -44,35 +44,38 @@ for _ in range(200):
 
 ## How It Works
 
-Traditional RL environments are stateful. Calling `env.step()` mutates the environment in place. JAX needs pure functions and immutable data, so Parallax splits things in two:
+RL environments are conventionally stateful (Gymnasium, PettingZoo, etc.). Calling `env.step()` mutates the environment in place. JAX needs pure functions and immutable data, so Parallax splits things in two:
 
-**Env** is stateless. A collection of pure functions (`reset`, `step`, `observation`, `reward`, ...) with no internal state.
+**Env** is stateless. It has two pure functions (`reset` and `step`) with no internal state.
 
-**State** is a JAX pytree that holds all the data. It gets passed into and returned from env functions.
+**State** is a JAX pytree that holds all the data. Every call to `reset` or `step` returns a new State with precomputed fields:
 
 ```python
 state = env.reset(key=jax.random.key(0))
 state = env.step(state, action)
 
+state.env_state    # raw environment data (any pytree)
 state.observation  # what the agent sees
 state.reward       # scalar reward
 state.termination  # episode ended naturally
 state.truncation   # episode was cut short
 state.done         # termination | truncation
-state.info         # extra metadata
+state.info         # extra metadata (dict)
+state.step_count   # current timestep
+state.key          # JAX RNG key
 ```
 
-Properties are computed lazily. Accessing `state.reward` calls `env.reward(state)` under the hood. If you never read a property, the computation doesn't happen.
+State is pure data. All values are computed in `reset`/`step` and stored directly.
 
 ## Building an Environment
 
-Implement `reset` and `step` for dynamics, plus property methods for what agents observe:
+Implement `reset` and `step`. Each returns a `State` with all fields computed:
 
 ```python
 import jax
 import jax.numpy as jnp
 from typing import NamedTuple
-from jaxtyping import Array, Bool, Float, PRNGKeyArray
+from jaxtyping import Array, PRNGKeyArray
 from parallax import Space, State, spaces
 
 
@@ -89,31 +92,34 @@ class GridWorld:
         key, goal_key = jax.random.split(key)
         pos = jnp.zeros(2, dtype=jnp.float32)
         goal = jax.random.randint(goal_key, (2,), minval=1, maxval=5).astype(jnp.float32)
-        return State(self, env_state=GridState(pos=pos, goal=goal), step_count=jnp.int32(0), key=key)
+        return State(
+            env_state=GridState(pos=pos, goal=goal),
+            observation=jnp.concatenate([pos, goal]),
+            reward=jnp.float32(0.0),
+            termination=jnp.bool_(False),
+            truncation=jnp.bool_(False),
+            info={},
+            step_count=jnp.int32(0),
+            key=key,
+        )
 
     def step(self, state: State, action: Array) -> State:
         moves = jnp.array([[0, 1], [0, -1], [1, 0], [-1, 0]], dtype=jnp.float32)
         pos = jnp.clip(state.env_state.pos + moves[action], 0.0, 4.0)
-        env_state = state.env_state._replace(pos=pos)
-        return State(self, env_state=env_state, step_count=state.step_count + 1, key=state.key)
-
-    def observation(self, state: State) -> Float[Array, "4"]:
-        return jnp.concatenate([state.env_state.pos, state.env_state.goal])
-
-    def reward(self, state: State) -> Float[Array, ""]:
-        return jnp.exp(-jnp.linalg.norm(state.env_state.pos - state.env_state.goal))
-
-    def termination(self, state: State) -> Bool[Array, ""]:
-        return jnp.all(state.env_state.pos == state.env_state.goal)
-
-    def truncation(self, state: State) -> Bool[Array, ""]:
-        return jnp.bool_(False)
-
-    def info(self, state: State) -> dict:
-        return {}
+        goal = state.env_state.goal
+        return State(
+            env_state=GridState(pos=pos, goal=goal),
+            observation=jnp.concatenate([pos, goal]),
+            reward=jnp.exp(-jnp.linalg.norm(pos - goal)),
+            termination=jnp.all(pos == goal),
+            truncation=jnp.bool_(False),
+            info={},
+            step_count=state.step_count + 1,
+            key=state.key,
+        )
 ```
 
-`env_state` is your raw environment data and can be any JAX pytree. Property methods like `observation` and `reward` derive what the agent sees from that internal state.
+`env_state` is your raw environment data and can be any JAX pytree. The other fields (`observation`, `reward`, etc.) are derived from it in `reset`/`step`.
 
 For multi-agent environments, agents are a dimension on your arrays. Reward, termination, and truncation become shape `(num_agents,)` while the method signatures stay the same. Environments where agents have different action space sizes will need padding and masking to maintain fixed array shapes. This is a JAX constraint (need for fixed shapes) rather than a Parallax one.
 
@@ -125,34 +131,46 @@ Wrappers compose to add functionality:
 from parallax import AutoResetWrapper, TimeLimit, VmapWrapper
 
 num_envs = 128
-env = VmapWrapper(AutoResetWrapper(TimeLimit(GridWorld(), max_steps=200)))
-keys = jax.random.split(jax.random.key(0), num_envs)
-state = env.reset(key=keys)
+env = VmapWrapper(AutoResetWrapper(TimeLimit(GridWorld(), max_steps=200)), num_envs=num_envs)
+state = env.reset(key=jax.random.key(0))
 state = env.step(state, actions)
 ```
 
 For manual resets (e.g. when you need terminal observations for value bootstrapping):
 
 ```python
-env = VmapWrapper(TimeLimit(GridWorld(), max_steps=200))
+env = VmapWrapper(TimeLimit(GridWorld(), max_steps=200), num_envs=num_envs)
 state = env.step(state, actions)
 state = env.reset(key=reset_key, state=state, done=state.done)
 ```
 
 ## Custom Properties
 
-Any method on your env is accessible as a property on the state. This works the same way as the built-in properties like `observation` and `reward`:
+Subclass `State` to add extra fields. For example, adding an action mask to `GridWorld`:
+
+```python
+from dataclasses import dataclass
+
+@jax.tree_util.register_dataclass
+@dataclass
+class MaskedState(State):
+    action_mask: Bool[Array, "4"]
+```
+
+Then return `MaskedState` from your env's `reset` and `step`:
 
 ```python
 class MaskedGridWorld(GridWorld):
-    def action_mask(self, state: State) -> Bool[Array, "4"]:
-        pos = state.env_state.pos
-        return jnp.array([pos[1] < 4, pos[1] > 0, pos[0] < 4, pos[0] > 0])
+    def reset(self, *, key: PRNGKeyArray) -> MaskedState:
+        state = super().reset(key=key)
+        return MaskedState(**vars(state), action_mask=compute_mask(state.env_state))
 
-state.action_mask  # calls env.action_mask(state)
+    def step(self, state: MaskedState, action: Array) -> MaskedState:
+        state = super().step(state, action)
+        return MaskedState(**vars(state), action_mask=compute_mask(state.env_state))
+
+state.action_mask  # fully typed, works with jit/vmap/wrappers
 ```
-
-Custom properties forward through wrappers automatically, including `VmapWrapper`.
 
 ## Collecting Experience
 
@@ -172,11 +190,11 @@ class Experience:
     termination: jax.Array
     
 num_envs = 128
-env = VmapWrapper(GridWorld())
+env = VmapWrapper(GridWorld(), num_envs=num_envs)
 
 key = jax.random.key(0)
 key, reset_key = jax.random.split(key)
-state = env.reset(key=jax.random.split(reset_key, num_envs))
+state = env.reset(key=reset_key)
 obs = state.observation
 
 def step_fn(carry, _):
@@ -196,7 +214,7 @@ def step_fn(carry, _):
     )
 
     # Reset environments where done, terminal obs captured above
-    state = env.reset(key=jax.random.split(reset_key, num_envs), state=state, done=state.done)
+    state = env.reset(key=reset_key, state=state, done=state.done)
     obs = state.observation
 
     return (state, obs, key), experience

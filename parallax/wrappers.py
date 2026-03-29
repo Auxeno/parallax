@@ -1,8 +1,8 @@
-import jax
-import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float, PRNGKeyArray, PyTree
-
+from dataclasses import replace
 from typing import Any
+
+import jax
+from jaxtyping import Array, Bool, PRNGKeyArray
 
 from .core import Env, State
 
@@ -15,51 +15,43 @@ class Wrapper:
         self.action_space = env.action_space
         self.observation_space = env.observation_space
 
-    def observation(self, state: State) -> PyTree:
-        return self.env.observation(state)
-
-    def reward(self, state: State) -> Float[Array, "..."]:
-        return self.env.reward(state)
-
-    def termination(self, state: State) -> Bool[Array, "..."]:
-        return self.env.termination(state)
-
-    def truncation(self, state: State) -> Bool[Array, "..."]:
-        return self.env.truncation(state)
-
-    def info(self, state: State) -> PyTree:
-        return self.env.info(state)
-
     def reset(self, *, key: PRNGKeyArray) -> State:
-        return self.env.reset(key=key).bind(self)
+        return self.env.reset(key=key)
 
     def step(self, state: State, action: Array) -> State:
-        return self.env.step(state, action).bind(self)
+        return self.env.step(state, action)
 
     def __getattr__(self, name: str) -> Any:
-        env = self.__dict__.get('env')
+        env = self.__dict__.get("env")
         if env is not None:
             return getattr(env, name)
         raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
 
 
 class VmapWrapper(Wrapper):
-    """Vectorises an environment over a batch of states using `jax.vmap`."""
+    """Vectorise an environment over a batch of states using `jax.vmap`.
 
-    def observation(self, state: State) -> PyTree:
-        return jax.vmap(self.env.observation)(state)
+    Parameters
+    ----------
+    env : Env
+        The environment to vectorise.
+    num_envs : int
+        Number of parallel environments.
 
-    def reward(self, state: State) -> Float[Array, "..."]:
-        return jax.vmap(self.env.reward)(state)
+    Examples
+    --------
+    >>> env = VmapWrapper(MyEnv(), num_envs=128)
+    >>> state = env.reset(key=jax.random.key(0))
+    >>> state = env.step(state, actions)
 
-    def termination(self, state: State) -> Bool[Array, "..."]:
-        return jax.vmap(self.env.termination)(state)
+    Selectively reset only finished environments:
 
-    def truncation(self, state: State) -> Bool[Array, "..."]:
-        return jax.vmap(self.env.truncation)(state)
+    >>> state = env.reset(key=jax.random.key(1), state=state, done=state.done)
+    """
 
-    def info(self, state: State) -> PyTree:
-        return jax.vmap(self.env.info)(state)
+    def __init__(self, env: Env, num_envs: int) -> None:
+        super().__init__(env)
+        self.num_envs = num_envs
 
     def reset(
         self,
@@ -68,41 +60,64 @@ class VmapWrapper(Wrapper):
         state: State | None = None,
         done: Bool[Array, "..."] | None = None,
     ) -> State:
+        """Reset all environments, or only those where `done=True`.
+
+        When `state` and `done` are omitted, all environments are reset.
+        When both are provided, only environments where `done=True` are reset.
+
+        Parameters
+        ----------
+        key : PRNGKeyArray
+            A single RNG key, split internally across environments.
+        state : State, optional
+            Current batched state. Required for selective resets.
+        done : Bool[Array, "num_envs"], optional
+            Boolean mask indicating which environments to reset.
+
+        Returns
+        -------
+        State
+            Batched state with leading dim `num_envs` on all leaves.
+        """
+        keys = jax.random.split(key, self.num_envs)
+        reset_state = jax.vmap(self.env.reset)(key=keys)
+
         if done is None or state is None:
-            return jax.vmap(self.env.reset)(key=key).bind(self)
-        keys = jax.random.split(key, done.shape[0])
-        new_state = jax.vmap(self.env.reset)(key=keys).bind(self)
+            return reset_state
 
-        def _select(n, o):
-            mask = done.reshape(-1, *([1] * (n.ndim - done.ndim)))
-            return jnp.where(mask, n, o)
-
-        return jax.tree.map(_select, new_state, state)
+        return jax.vmap(lambda d, r, s: jax.lax.cond(d, lambda: r, lambda: s))(
+            done,
+            reset_state,
+            state,
+        )
 
     def step(self, state: State, action: Array) -> State:
-        return jax.vmap(self.env.step)(state, action).bind(self)
+        """Step all environments in parallel.
 
-    def __getattr__(self, name: str) -> Any:
-        env = self.__dict__.get('env')
-        if env is not None:
-            attr = getattr(env, name)
-            if callable(attr):
-                return lambda state: jax.vmap(attr)(state)
-            return attr
-        raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
+        Parameters
+        ----------
+        state : State
+            Batched state with leading dim `num_envs`.
+        action : Array
+            Batched actions with leading dim `num_envs`.
+
+        Returns
+        -------
+        State
+            Updated batched state.
+        """
+        return jax.vmap(self.env.step)(state, action)
 
 
 class AutoResetWrapper(Wrapper):
     """Automatically resets the environment when an episode ends."""
 
     def step(self, state: State, action: Array) -> State:
-        state = self.env.step(state, action).bind(self)
-        done = jnp.any(state.termination | state.truncation)
+        state = self.env.step(state, action)
         key, reset_key = jax.random.split(state.key)
-        reset_state = self.env.reset(key=reset_key).bind(self)
-        state = jax.tree.map(lambda r, s: jnp.where(done, r, s), reset_state, state)
-        state.key = key
-        return state
+        reset_state = self.env.reset(key=reset_key)
+        state = jax.lax.cond(state.done, lambda: reset_state, lambda: state)
+        return replace(state, key=key)
 
 
 class TimeLimit(Wrapper):
@@ -112,5 +127,6 @@ class TimeLimit(Wrapper):
         super().__init__(env)
         self.max_steps = max_steps
 
-    def truncation(self, state: State) -> Bool[Array, "..."]:
-        return self.env.truncation(state) | (state.step_count >= self.max_steps)
+    def step(self, state: State, action: Array) -> State:
+        state = self.env.step(state, action)
+        return replace(state, truncation=state.truncation | (state.step_count >= self.max_steps))
