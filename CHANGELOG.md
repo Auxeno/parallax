@@ -1,0 +1,20 @@
+# Changelog
+
+## v0.2.1
+
+- Add `VectorEnv` protocol for vectorised environments with selective reset
+- Add GitHub Actions workflow for automatic PyPI publishing
+- Lazily import adapters
+
+## v0.2.0
+
+- Add Gymnax and Brax adapters
+- Simplify `State` dataclass by removing lazy properties
+- Simplify `Env` protocol
+
+## v0.1.0
+
+- Initial release
+- `Env` protocol and `State` dataclass
+- `VmapWrapper`, `AutoResetWrapper`, and `TimeLimit` wrappers
+- Basic test suite
