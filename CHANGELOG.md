@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.2
+
+- Brax adapter strips `AutoResetWrapper` and `EpisodeWrapper`, handling truncation internally
+
 ## v0.2.1
 
 - Add `VectorEnv` protocol for vectorised environments with selective reset
