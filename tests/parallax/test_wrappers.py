@@ -7,8 +7,8 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 
 from conftest import assert_trees_close, assert_trees_equal
-from parallax.spaces import Box, Discrete
 from parallax.core import State
+from parallax.spaces import Box, Discrete
 from parallax.wrappers import AutoResetWrapper, TimeLimit, VmapWrapper
 
 

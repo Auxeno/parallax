@@ -1,11 +1,12 @@
 """Tests for environment adapters."""
 
-import jax
-import jax.numpy as jnp
 import warnings
 
-from parallax.adapters.gymnax import GymnaxAdapter
+import jax
+import jax.numpy as jnp
+
 from parallax.adapters.brax import BraxAdapter
+from parallax.adapters.gymnax import GymnaxAdapter
 from parallax.core import State
 from parallax.wrappers import AutoResetWrapper, TimeLimit, VmapWrapper
 
@@ -325,14 +326,35 @@ class TestBraxAdapter:
         new_state = env.reset(key=jax.random.key(1), state=state, done=state.done)
         assert jnp.all(new_state.step_count == 0)
 
-    def test_rejects_autoreset_wrapper(self):
-        """BraxAdapter raises if brax's AutoResetWrapper is present."""
-        import pytest
-        from brax.envs.wrappers.training import AutoResetWrapper as BraxAutoReset
-
+    def test_strips_brax_wrappers(self):
+        """BraxAdapter strips Brax wrappers and extracts episode_length."""
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            raw = brax_envs.get_environment("inverted_pendulum")
-        wrapped = BraxAutoReset(raw)
-        with pytest.raises(ValueError, match="AutoResetWrapper"):
-            BraxAdapter(wrapped)
+            brax_env = brax_envs.create("inverted_pendulum", episode_length=42)
+        env = BraxAdapter(brax_env)
+        assert env.episode_length == 42
+
+    def test_brax_create_with_timelimit(self):
+        """BraxAdapter truncates at the extracted episode_length."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            brax_env = brax_envs.create("halfcheetah", episode_length=5)
+        env = BraxAdapter(brax_env)
+
+        state = env.reset(key=jax.random.key(0))
+        assert not state.done
+
+        for i in range(5):
+            action = env.action_space.sample(key=jax.random.key(i))
+            state = env.step(state, action)
+
+        # Should be truncated, not terminated
+        assert state.truncation
+        assert not state.termination
+        assert state.done
+        assert state.step_count == 5
+
+        # No autoreset - stepping past the limit continues
+        action = env.action_space.sample(key=jax.random.key(99))
+        next_state = env.step(state, action)
+        assert next_state.step_count == 6

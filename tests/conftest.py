@@ -4,8 +4,8 @@ import jax.tree_util as jtu
 import numpy.testing as npt
 import pytest
 
-from parallax.spaces import Box, Discrete, MultiBinary, MultiDiscrete, PyTreeSpace
 from parallax.core import State
+from parallax.spaces import Box, Discrete, MultiBinary, MultiDiscrete, PyTreeSpace
 
 
 @pytest.fixture
