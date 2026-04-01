@@ -8,6 +8,8 @@ from .spaces import Space
 
 
 class Env(Protocol):
+    """Basic Parallax environment protocol."""
+
     @property
     def action_space(self) -> Space: ...
 
@@ -16,6 +18,18 @@ class Env(Protocol):
 
     def reset(self, *, key: PRNGKeyArray) -> "State": ...
     def step(self, state: "State", action: Array) -> "State": ...
+
+
+class VectorEnv(Env, Protocol):
+    """Vectorised Parallax environment protocol."""
+
+    def reset(
+        self,
+        *,
+        key: PRNGKeyArray,
+        state: "State | None" = None,
+        done: "Bool[Array, '...'] | None" = None,
+    ) -> "State": ...
 
 
 @jax.tree_util.register_dataclass
