@@ -497,3 +497,36 @@ class TestMJXAdapter:
 
         new_state = env.reset(key=jax.random.key(1), state=state, done=state.done)
         assert jnp.all(new_state.step_count == 0)
+
+    def test_episode_length_from_config(self):
+        """MJXAdapter extracts episode_length from the playground config."""
+        env = _make_mjx_env()
+        assert env.episode_length == 1000
+
+    def test_truncation_at_episode_length(self):
+        """MJXAdapter truncates at the config episode_length."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            raw = mujoco_playground.registry.load(
+                "CartpoleBalance",
+                config_overrides={"impl": "jax", "episode_length": 5},
+            )
+        env = MJXAdapter(raw)
+        assert env.episode_length == 5
+
+        state = env.reset(key=jax.random.key(0))
+        assert not state.done
+
+        for i in range(5):
+            action = env.action_space.sample(key=jax.random.key(i))
+            state = env.step(state, action)
+
+        assert state.truncation
+        assert not state.termination
+        assert state.done
+        assert state.step_count == 5
+
+        # No autoreset - stepping past the limit continues
+        action = env.action_space.sample(key=jax.random.key(99))
+        next_state = env.step(state, action)
+        assert next_state.step_count == 6

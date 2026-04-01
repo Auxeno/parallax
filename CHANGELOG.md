@@ -1,10 +1,14 @@
 # Changelog
 
+## v0.2.4
+
+- MJX adapter extracts `episode_length` from environment config for built-in truncation
+
 ## v0.2.3
 
 - Add MuJoCo Playground (MJX) adapter
 - Add optional dependency groups: `parallax-rl[brax]`, `parallax-rl[gymnax]`, `parallax-rl[mjx]`, `parallax-rl[adapters]`
-- Adapter imports now show install instructions when dependencies are missing
+- Adapter imports show install instructions when dependencies are missing
 
 ## v0.2.2
 

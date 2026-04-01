@@ -27,6 +27,7 @@ class MJXAdapter:
 
     def __init__(self, env: Any) -> None:
         self.env = env
+        self.episode_length = env._config.episode_length
         obs_size = env.observation_size
         if isinstance(obs_size, int):
             self.observation_space: Space = Box(-jnp.inf, jnp.inf, (obs_size,))
@@ -53,13 +54,14 @@ class MJXAdapter:
 
     def step(self, state: State, action: Array) -> State:
         mjx_state = self.env.step(state.env_state, action)
+        step_count = state.step_count + 1
         return State(
             env_state=mjx_state,
             observation=mjx_state.obs,
             reward=jnp.float32(mjx_state.reward),
             termination=jnp.bool_(mjx_state.done),
-            truncation=jnp.bool_(mjx_state.info.get("time_out", 0.0)),
+            truncation=jnp.bool_(step_count >= self.episode_length),
             info=mjx_state.metrics,
-            step_count=state.step_count + 1,
+            step_count=step_count,
             key=state.key,
         )

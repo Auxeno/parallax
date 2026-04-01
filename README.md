@@ -24,6 +24,12 @@ Protocol, not a framework. No base class, no registration.
 
 ```bash
 pip install parallax-rl
+
+# With adapter dependencies
+pip install parallax-rl[brax]     # Brax environments
+pip install parallax-rl[gymnax]   # Gymnax environments
+pip install parallax-rl[mjx]      # MuJoCo Playground (MJX) environments
+pip install parallax-rl[adapters] # All adapters
 ```
 
 ## Quick Start
@@ -164,7 +170,15 @@ env = BraxAdapter(brax.envs.get_environment("ant"))
 env = VmapWrapper(env, num_envs=128)
 ```
 
-Adapters map foreign reset/step APIs to the Parallax protocol. Brax's built-in auto-reset is stripped automatically to preserve terminal observations.
+```python
+from mujoco_playground import registry
+from parallax.adapters import MJXAdapter
+
+env = MJXAdapter(registry.load("HumanoidWalk", config_overrides={"impl": "jax"}))
+env = VmapWrapper(env, num_envs=128)
+```
+
+Adapters map foreign reset/step APIs to the Parallax protocol. Brax and MJX adapters extract episode length from the underlying environment and handle truncation internally. Brax's built-in auto-reset is stripped automatically to preserve terminal observations.
 
 ## Custom Properties
 
