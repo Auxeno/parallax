@@ -7,11 +7,13 @@ import jax.numpy as jnp
 
 from parallax.adapters.brax import BraxAdapter
 from parallax.adapters.gymnax import GymnaxAdapter
+from parallax.adapters.mjx import MJXAdapter
 from parallax.core import State
 from parallax.wrappers import AutoResetWrapper, TimeLimit, VmapWrapper
 
 gymnax = __import__("pytest").importorskip("gymnax")
 brax_envs = __import__("pytest").importorskip("brax.envs")
+mujoco_playground = __import__("pytest").importorskip("mujoco_playground")
 
 
 def _make_env():
@@ -358,3 +360,140 @@ class TestBraxAdapter:
         action = env.action_space.sample(key=jax.random.key(99))
         next_state = env.step(state, action)
         assert next_state.step_count == 6
+
+
+def _make_mjx_env():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        raw = mujoco_playground.registry.load("CartpoleBalance", config_overrides={"impl": "jax"})
+    return MJXAdapter(raw)
+
+
+class TestMJXAdapter:
+    def test_reset_returns_state(self):
+        env = _make_mjx_env()
+        state = env.reset(key=jax.random.key(0))
+        assert isinstance(state, State)
+
+    def test_reset_observation_shape(self):
+        env = _make_mjx_env()
+        state = env.reset(key=jax.random.key(0))
+        assert state.observation.shape == (5,)
+
+    def test_reset_not_done(self):
+        env = _make_mjx_env()
+        state = env.reset(key=jax.random.key(0))
+        assert not state.termination
+        assert not state.truncation
+        assert not state.done
+
+    def test_step_returns_state(self):
+        env = _make_mjx_env()
+        state = env.reset(key=jax.random.key(0))
+        action = env.action_space.sample(key=jax.random.key(1))
+        state = env.step(state, action)
+        assert isinstance(state, State)
+        assert state.step_count == 1
+
+    def test_step_reward_dtype(self):
+        env = _make_mjx_env()
+        state = env.reset(key=jax.random.key(0))
+        action = env.action_space.sample(key=jax.random.key(1))
+        state = env.step(state, action)
+        assert jnp.issubdtype(state.reward.dtype, jnp.floating)
+
+    def test_spaces(self):
+        env = _make_mjx_env()
+        assert hasattr(env.action_space, "sample")
+        assert hasattr(env.observation_space, "sample")
+
+    def test_with_vmap_wrapper(self):
+        env = VmapWrapper(_make_mjx_env(), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
+        assert state.observation.shape == (4, 5)
+        actions = jax.vmap(env.action_space.sample)(key=jax.random.split(jax.random.key(1), 4))
+        state = env.step(state, actions)
+        assert state.observation.shape == (4, 5)
+        assert state.reward.shape == (4,)
+
+    def test_with_timelimit(self):
+        """TimeLimit truncates the episode."""
+        env = TimeLimit(_make_mjx_env(), max_steps=5)
+        state = env.reset(key=jax.random.key(0))
+        for _ in range(5):
+            action = env.action_space.sample(key=jax.random.key(1))
+            state = env.step(state, action)
+        assert state.truncation
+        assert state.done
+
+    def test_with_autoreset(self):
+        """AutoResetWrapper resets on truncation via TimeLimit."""
+        env = AutoResetWrapper(TimeLimit(_make_mjx_env(), max_steps=5))
+        state = env.reset(key=jax.random.key(0))
+        for _ in range(5):
+            action = env.action_space.sample(key=jax.random.key(1))
+            state = env.step(state, action)
+        assert state.step_count == 0
+        assert not state.done
+
+    def test_vmap_selective_reset(self):
+        """VmapWrapper selective reset works with MJX adapter."""
+        env = VmapWrapper(_make_mjx_env(), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
+
+        actions = jax.vmap(env.action_space.sample)(key=jax.random.split(jax.random.key(1), 4))
+        state = env.step(state, actions)
+
+        done = jnp.array([True, False, False, True])
+        new_state = env.reset(key=jax.random.key(2), state=state, done=done)
+
+        assert new_state.step_count[0] == 0  # reset
+        assert new_state.step_count[1] == 1  # kept
+        assert new_state.step_count[2] == 1  # kept
+        assert new_state.step_count[3] == 0  # reset
+
+    def test_full_wrapper_stack(self):
+        """Full stack: TimeLimit + AutoReset + Vmap composes correctly."""
+        env = VmapWrapper(AutoResetWrapper(TimeLimit(_make_mjx_env(), max_steps=10)), num_envs=4)
+        key = jax.random.key(0)
+        key, reset_key = jax.random.split(key)
+        state = env.reset(key=reset_key)
+
+        for _ in range(20):
+            key, action_key = jax.random.split(key)
+            actions = jax.vmap(env.action_space.sample)(key=jax.random.split(action_key, 4))
+            state = env.step(state, actions)
+
+        assert jnp.all(state.step_count < 10)
+
+    def test_terminal_observation_preserved(self):
+        """Terminal obs via TimeLimit is the true final observation."""
+        env = TimeLimit(_make_mjx_env(), max_steps=5)
+        state = env.reset(key=jax.random.key(0))
+
+        for _ in range(5):
+            action = env.action_space.sample(key=jax.random.key(1))
+            state = env.step(state, action)
+
+        assert state.done
+        terminal_obs = state.observation
+        assert terminal_obs.shape == (5,)
+        assert not jnp.all(terminal_obs == 0.0)
+
+    def test_vmap_terminal_obs(self):
+        """Terminal observations are correct in batched setting."""
+        env = VmapWrapper(TimeLimit(_make_mjx_env(), max_steps=5), num_envs=4)
+        key = jax.random.key(0)
+        key, reset_key = jax.random.split(key)
+        state = env.reset(key=reset_key)
+
+        for _ in range(5):
+            key, action_key = jax.random.split(key)
+            actions = jax.vmap(env.action_space.sample)(key=jax.random.split(action_key, 4))
+            state = env.step(state, actions)
+
+        assert jnp.all(state.truncation)
+        assert not jnp.all(state.observation == 0.0)
+
+        new_state = env.reset(key=jax.random.key(1), state=state, done=state.done)
+        assert jnp.all(new_state.step_count == 0)

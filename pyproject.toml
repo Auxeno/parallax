@@ -12,6 +12,12 @@ dependencies = [
     "jaxtyping>=0.3.0",
 ]
 
+[project.optional-dependencies]
+brax = ["brax"]
+gymnax = ["gymnax"]
+mjx = ["playground"]
+adapters = ["parallax-rl[brax,gymnax,mjx]"]
+
 [project.urls]
 Homepage = "https://github.com/auxeno/parallax"
 Repository = "https://github.com/auxeno/parallax"
@@ -33,6 +39,7 @@ dev = [
     "ruff",
     "ipykernel",
     "pip",
+    "parallax-rl[adapters]",
 ]
 
 [tool.ruff]
@@ -50,3 +57,4 @@ reportIncompatibleMethodOverride = false
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+

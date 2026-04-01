@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.3
+
+- Add MuJoCo Playground (MJX) adapter
+- Add optional dependency groups: `parallax-rl[brax]`, `parallax-rl[gymnax]`, `parallax-rl[mjx]`, `parallax-rl[adapters]`
+- Adapter imports now show install instructions when dependencies are missing
+
 ## v0.2.2
 
 - Brax adapter strips `AutoResetWrapper` and `EpisodeWrapper`, handling truncation internally
