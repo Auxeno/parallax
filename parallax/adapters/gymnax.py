@@ -74,7 +74,7 @@ class GymnaxAdapter:
             reward=reward,
             termination=done,
             truncation=jnp.bool_(False),
-            info=info,
+            info={"discount": jnp.float32(info.get("discount", 1.0))},
             step_count=state.step_count + 1,
             key=key,
         )

@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.5
+
+- Fix dtype mismatch in Gymnax adapter: `info['discount']` is now consistently `float32` in both `reset()` and `step()`
+
 ## v0.2.4
 
 - MJX adapter extracts `episode_length` from environment config for built-in truncation
