@@ -402,10 +402,10 @@ class TestSubclassedState:
         env = VmapWrapper(self._MaskedEnv(), num_envs=4)
         state = env.reset(key=jax.random.key(0))
         state = env.step(state, jnp.zeros(4, dtype=jnp.int32))
-        assert state.action_mask.shape == (4, 2)  # type: ignore[attr-defined]
+        assert state.action_mask.shape == (4, 2)
 
     def test_through_wrapper_stack(self):
         env = VmapWrapper(TimeLimit(self._MaskedEnv(), max_steps=10), num_envs=4)
         state = env.reset(key=jax.random.key(0))
         state = env.step(state, jnp.zeros(4, dtype=jnp.int32))
-        assert state.action_mask.shape == (4, 2)  # type: ignore[attr-defined]
+        assert state.action_mask.shape == (4, 2)

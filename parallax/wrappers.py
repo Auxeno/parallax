@@ -1,24 +1,41 @@
 from dataclasses import replace
-from typing import Any
+from typing import Any, Generic, Protocol, TypeVar
 
 import jax
 from jaxtyping import Array, Bool, PRNGKeyArray
 
-from .core import Env, State
+from .core import MARLState, State
+from .spaces import Space
+
+# Same state type in, same state type out, bound to the wrapped env at construction
+StateT = TypeVar("StateT", bound=State | MARLState)
 
 
-class Wrapper:
+class EnvLike(Protocol[StateT]):
+    """Structural env protocol binding a wrapper to its environment's state type."""
+
+    @property
+    def action_space(self) -> Space: ...
+
+    @property
+    def observation_space(self) -> Space: ...
+
+    def reset(self, *, key: PRNGKeyArray) -> StateT: ...
+    def step(self, state: StateT, action: Any) -> StateT: ...
+
+
+class Wrapper(Generic[StateT]):
     """Base wrapper. Subclass this to create custom wrappers."""
 
-    def __init__(self, env: Env) -> None:
+    def __init__(self, env: EnvLike[StateT]) -> None:
         self.env = env
         self.action_space = env.action_space
         self.observation_space = env.observation_space
 
-    def reset(self, *, key: PRNGKeyArray) -> State:
+    def reset(self, *, key: PRNGKeyArray) -> StateT:
         return self.env.reset(key=key)
 
-    def step(self, state: State, action: Array) -> State:
+    def step(self, state: StateT, action: Array) -> StateT:
         return self.env.step(state, action)
 
     def __getattr__(self, name: str) -> Any:
@@ -28,12 +45,12 @@ class Wrapper:
         raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
 
 
-class VmapWrapper(Wrapper):
+class VmapWrapper(Wrapper[StateT]):
     """Vectorise an environment over a batch of states using `jax.vmap`.
 
     Parameters
     ----------
-    env : Env
+    env : EnvLike
         The environment to vectorise.
     num_envs : int
         Number of parallel environments.
@@ -49,7 +66,7 @@ class VmapWrapper(Wrapper):
     >>> state = env.reset(key=jax.random.key(1), state=state, done=state.done)
     """
 
-    def __init__(self, env: Env, num_envs: int) -> None:
+    def __init__(self, env: EnvLike[StateT], num_envs: int) -> None:
         super().__init__(env)
         self.num_envs = num_envs
 
@@ -57,9 +74,9 @@ class VmapWrapper(Wrapper):
         self,
         *,
         key: PRNGKeyArray,
-        state: State | None = None,
+        state: StateT | None = None,
         done: Bool[Array, "..."] | None = None,
-    ) -> State:
+    ) -> StateT:
         """Reset all environments, or only those where `done=True`.
 
         When `state` and `done` are omitted, all environments are reset.
@@ -91,7 +108,7 @@ class VmapWrapper(Wrapper):
             state,
         )
 
-    def step(self, state: State, action: Array) -> State:
+    def step(self, state: StateT, action: Array) -> StateT:
         """Step all environments in parallel.
 
         Parameters
@@ -109,10 +126,10 @@ class VmapWrapper(Wrapper):
         return jax.vmap(self.env.step)(state, action)
 
 
-class AutoResetWrapper(Wrapper):
+class AutoResetWrapper(Wrapper[StateT]):
     """Automatically resets the environment when an episode ends."""
 
-    def step(self, state: State, action: Array) -> State:
+    def step(self, state: StateT, action: Array) -> StateT:
         state = self.env.step(state, action)
         key, reset_key = jax.random.split(state.key)
         reset_state = self.env.reset(key=reset_key)
@@ -120,13 +137,13 @@ class AutoResetWrapper(Wrapper):
         return replace(state, key=key)
 
 
-class TimeLimit(Wrapper):
+class TimeLimit(Wrapper[StateT]):
     """Truncates episodes that exceed a maximum number of steps."""
 
-    def __init__(self, env: Env, max_steps: int) -> None:
+    def __init__(self, env: EnvLike[StateT], max_steps: int) -> None:
         super().__init__(env)
         self.max_steps = max_steps
 
-    def step(self, state: State, action: Array) -> State:
+    def step(self, state: StateT, action: Array) -> StateT:
         state = self.env.step(state, action)
         return replace(state, truncation=state.truncation | (state.step_count >= self.max_steps))

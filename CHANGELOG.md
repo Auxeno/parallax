@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.0
+
+- Add multi-agent protocol: `MARLEnv`, `MARLVectorEnv`, `MARLState`, and `Agents`
+- Episode termination and truncation stay scalar, per-agent lifecycle is tracked with `agents.active`
+- Per-agent rewards in `agents.reward`, shared team rewards broadcast to active slots
+- Optional `action_mask` and `global_observation` fields for action masking and centralised critics
+- Existing wrappers (`TimeLimit`, `VmapWrapper`) work on MARL environments unchanged
+- Wrappers are generic over the state type, fully typed for both protocols and subclassed states
+
 ## v0.2.5
 
 - Fix dtype mismatch in Gymnax adapter: `info['discount']` is now consistently `float32` in both `reset()` and `step()`

@@ -127,7 +127,7 @@ class GridWorld:
 
 `env_state` is your raw environment data and can be any JAX pytree. The other fields (`observation`, `reward`, etc.) are derived from it in `reset`/`step`.
 
-For multi-agent environments, agents are a dimension on your arrays. Reward, termination, and truncation become shape `(num_agents,)` while the method signatures stay the same. Environments where agents have different action space sizes will need padding and masking to maintain fixed array shapes. This is a JAX constraint (need for fixed shapes) rather than a Parallax one.
+For multi-agent environments, Parallax has a dedicated protocol. See [Multi-Agent Environments](#multi-agent-environments).
 
 ## Wrappers
 
@@ -149,6 +149,58 @@ env = VmapWrapper(TimeLimit(GridWorld(), max_steps=200), num_envs=num_envs)
 state = env.step(state, actions)
 state = env.reset(key=reset_key, state=state, done=state.done)
 ```
+
+## Multi-Agent Environments
+
+Multi-agent APIs typically conflate two different things: the episode ending and an individual agent dying. Parallax keeps them separate. `MARLState` keeps termination and truncation as episode-level scalars and tracks per-agent lifecycle with an `active` mask:
+
+```python
+from parallax import MARLEnv, MARLState, Agents
+
+state.env_state           # raw environment data (any pytree)
+state.termination         # the MDP ended naturally
+state.truncation          # the MDP was cut short
+state.done                # termination | truncation
+
+state.agents.observation  # per-agent observations, leading dim num_agents
+state.agents.active       # which agents act on the next step
+state.agents.reward       # per-agent rewards, zeros in inactive slots
+state.agents.action_mask  # per-agent legal actions, or None
+state.global_observation  # full-state view for centralised critics, or None
+```
+
+Agents occupy array slots `0..num_agents - 1` and are shape-homogeneous: `action_space` and `observation_space` describe a single agent's space, and per-agent data stacks on a leading `num_agents` dimension. Heterogeneous agents pad to the largest shape and express legality through `action_mask`.
+
+The contract environments implement:
+
+1. Inactive agents' actions are ignored, environments tolerate arbitrary values in those slots
+2. Inactive agents' observations are zeros
+3. Inactive agents' slots in `agents.reward` are zeros, the step an agent dies on is an active step and may carry reward
+4. Inactive agents' action masks contain at least one legal action
+5. `agents.active` marks the agents whose actions the next `step` call will use
+6. The environment sets `termination` itself, all agents becoming inactive does not implicitly end the MDP
+
+Rule 5 fixes the timing: rewards in a state pair with the `active` mask of the previous state.
+
+```python
+state_1 = env.step(state_0, actions_0)
+# state_0.agents.active  marks whose actions in actions_0 are used
+# state_1.agents.reward  pairs with state_0.agents.active
+```
+
+Everything a learning algorithm needs is a one-liner from these fields, nothing is stored twice:
+
+```python
+valid = state_t.agents.active                            # transition is real, use it in the loss
+bootstrap = state_t1.agents.active & ~state_t1.termination  # died or terminated, no bootstrap
+rewards = state_t1.agents.reward                         # pairs with state_t.agents.active
+```
+
+An agent that dies on the step the episode truncates composes correctly with no special casing: it stops bootstrapping through `active`, while surviving agents bootstrap from the terminal observation.
+
+Teams are not a protocol concept, slots are. Competitive and team tasks broadcast each team's reward to its members' slots in `agents.reward`: all slots equal is fully cooperative, `+1`/`-1` across two blocks of slots is two-team zero-sum. A team critic reads its own members' slots, and team membership itself is environment metadata (subclass `Agents` to expose it, see [Custom Properties](#custom-properties)). There is no MDP-level reward field, the shared scalar in cooperative tasks is simply the value at any active slot.
+
+Because the episode-level fields match the single-agent `State`, wrappers like `TimeLimit` and `VmapWrapper` work on multi-agent environments unchanged.
 
 ## Adapters
 
@@ -257,3 +309,24 @@ def step_fn(carry, _):
 
 (state, obs, key), experiences = jax.lax.scan(step_fn, (state, obs, key), None, length=256)
 ```
+
+## Assumptions & Sharp Edges
+
+Parallax trusts environments to follow the protocol. Nothing is validated at runtime, and the jaxtyping annotations are documentation rather than enforcement. The things most likely to bite:
+
+**General**
+
+- **Pytree structure must be stable.** Every `reset` and `step` of a given environment must return the same treedef: same `info` keys, same dtypes, and optional fields consistently `None` or consistently arrays. Structure that changes between calls breaks `jit`, `lax.cond`, `lax.scan`, and selective resets.
+- **Shapes are fixed.** Anything variable-length (legal actions, live agents, episode length) is expressed with padding and masking, never with dynamic shapes. This is a JAX constraint, not a Parallax choice.
+- **`step_count` powers `TimeLimit`.** Environments must increment it every step or wrapped truncation never fires.
+- **Termination and truncation are distinct on purpose.** Bootstrapping value targets from the terminal observation is correct on truncation and wrong on termination. `done` alone is not enough to write a correct update, it only tells you the episode ended.
+- **Stepping a done state is undefined by the protocol.** Environments are not required to freeze or reset themselves. Reset instead, selective reset via `VmapWrapper` keeps terminal observations available first.
+- **Shapes widen under `VmapWrapper`.** A scalar `reward` becomes `(num_envs,)` and multi-agent `(num_agents,)` fields become `(num_envs, num_agents)`. The `...` in the field annotations is that batch dimension.
+
+**Multi-agent**
+
+- **The agent count is static.** `num_agents` is a trace-time constant and an upper bound. Agents can die, and the protocol does not forbid re-activation (respawns), but the slot count never changes.
+- **The reward/active pairing is off by one by design.** Rewards in the state returned by `step` pair with the `active` mask of the state passed in. Scan-collected trajectories must respect this, see the timing diagram above.
+- **There is no MDP-level reward.** `agents.reward` is the only reward signal, shared team rewards are broadcast to active slots. Because inactive slots are zeros, extracting the team scalar is not `agents.reward[0]` (slot 0 may be dead), use the active mask consumers already carry: `rewards[jnp.argmax(active_t)]`.
+- **Nothing is zeroed for you at training time.** The environment zeros observations and rewards of inactive slots, but masking learning updates and bootstrapping with `active` is the consumer's job.
+- **Value factorization is a deliberate exception.** Methods like QMIX may keep inactive agents in training with masked no-op actions, ignoring the transition-validity rule on purpose. Both patterns are expressible, neither is imposed.
