@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.1
+
+- Add `stack_space` to build spaces with a leading `num_agents` dimension, exported from `parallax`
+- `Space` protocol now declares a `shape` property, implemented by all spaces
+- `PyTreeSpace.shape` returns a pytree of the leaf space shapes, mirroring `sample`
+- `MultiDiscrete` supports multi-dimensional `actions_per_dim`
+- `MultiBinary` accepts a tuple `n` for multi-dimensional shapes
+
 ## v0.3.0
 
 - Add multi-agent protocol: `MARLEnv`, `MARLVectorEnv`, `MARLState`, and `Agents`
@@ -8,11 +16,6 @@
 - Optional `action_mask` and `global_observation` fields for action masking and centralised critics
 - Existing wrappers (`TimeLimit`, `VmapWrapper`) work on MARL environments unchanged
 - Wrappers are generic over the state type, fully typed for both protocols and subclassed states
-- Add `stack_space` to build spaces with a leading `num_agents` dimension, exported from `parallax`
-- `Space` protocol now declares a `shape` property, implemented by all spaces
-- `PyTreeSpace.shape` returns a pytree of the leaf space shapes, mirroring `sample`
-- `MultiDiscrete` supports multi-dimensional `actions_per_dim`
-- `MultiBinary` accepts a tuple `n` for multi-dimensional shapes
 
 ## v0.2.5
 
