@@ -191,9 +191,9 @@ state_1 = env.step(state_0, actions_0)
 Everything a learning algorithm needs is a one-liner from these fields, nothing is stored twice:
 
 ```python
-valid = state_t.agents.active                            # transition is real, use it in the loss
+valid = state_t.agents.active                               # transition is real, use it in the loss
 bootstrap = state_t1.agents.active & ~state_t1.termination  # died or terminated, no bootstrap
-rewards = state_t1.agents.reward                         # pairs with state_t.agents.active
+rewards = state_t1.agents.reward                            # pairs with state_t.agents.active
 ```
 
 An agent that dies on the step the episode truncates composes correctly with no special casing: it stops bootstrapping through `active`, while surviving agents bootstrap from the terminal observation.

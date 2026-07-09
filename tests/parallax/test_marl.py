@@ -5,24 +5,19 @@ from dataclasses import replace
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
-
 from conftest import assert_trees_close, assert_trees_equal
+
 from parallax.core import Agents, MARLState
-from parallax.spaces import Box, Discrete
+from parallax.spaces import Box, Discrete, stack_space
 from parallax.wrappers import TimeLimit, VmapWrapper
 
 
 class LastAgentStandingEnv:
-    """Three agents die at steps 2, 4 and 6, termination when all are dead.
-
-    Active agents add their action value to a running score each step and
-    receive reward 1 + action. With `minimal=True` the optional fields
-    (`action_mask`, `global_observation`) are `None`.
-    """
+    """Three agents die at steps 2, 4 and 6, termination when all are dead."""
 
     num_agents = 3
-    action_space = Discrete(2)
-    observation_space = Box(low=0.0, high=100.0, shape=())
+    action_space = stack_space(Discrete(2), num_agents)
+    observation_space = stack_space(Box(low=0.0, high=100.0, shape=()), num_agents)
 
     def __init__(self, minimal: bool = False) -> None:
         self.minimal = minimal
@@ -106,6 +101,23 @@ class TestStructure:
         assert state.global_observation is not None
         assert state.global_observation.shape == (4,)
         assert state.global_observation[0] == 2.0
+
+    def test_spaces_lead_with_num_agents(self):
+        env = LastAgentStandingEnv()
+        assert env.action_space.shape == (3,)
+        assert env.observation_space.shape == (3,)
+
+    def test_action_sample_is_valid_step_input(self):
+        env = LastAgentStandingEnv()
+        state = env.reset(key=jax.random.key(0))
+        action = env.action_space.sample(key=jax.random.key(1))
+        state = env.step(state, action)
+        assert isinstance(state, MARLState)
+
+    def test_observation_space_matches_observation(self):
+        env = LastAgentStandingEnv()
+        state = env.reset(key=jax.random.key(0))
+        assert env.observation_space.shape == state.agents.observation.shape
 
 
 class TestContract:
