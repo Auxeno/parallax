@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.4.0
+
+- Protocols are now one generic hierarchy over the state type: `Env[StateT]`, `VectorEnv[StateT]`, `MARLEnv[MARLStateT]`, `MARLVectorEnv[MARLStateT]`
+- TypeVar defaults keep the bare names unchanged: `Env` means `Env[State]`, `MARLEnv` means `MARLEnv[MARLState]`
+- `VectorEnv` declares `num_envs`, wrappers declare `num_agents` statically (1 for single-agent envs), so a wrapped MARL env satisfies `MARLVectorEnv` in type checkers
+- Custom `State` subclasses stay fully typed through wrapper stacks
+- `step` actions are typed as `PyTree`, covering multi-agent action pytrees
+- Selective reset arguments pass through wrapper stacks to the vector env inside
+- `VmapWrapper.reset` raises `ValueError` when only one of `state` and `done` is provided
+- Remove the `EnvLike` protocol from `parallax.wrappers`, use `Env[StateT]` instead
+- Add `typing-extensions` dependency for TypeVar defaults on Python 3.11 and 3.12
+- Rewrite README: tighter copy, multi-agent environment example, expanded sharp edges
+
 ## v0.3.1
 
 - Add `stack_space` to build spaces with a leading `num_agents` dimension, exported from `parallax`

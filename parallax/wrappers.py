@@ -1,44 +1,42 @@
+"""Composable environment wrappers.
+
+- `Wrapper`: base class for custom wrappers, forwards to the wrapped env
+- `VmapWrapper`: batch an env over `num_envs` with `jax.vmap`, selective reset
+- `AutoResetWrapper`: restart episodes as they end
+- `TimeLimit`: truncate episodes after `max_steps`
+
+Wrappers preserve the wrapped env's state type, so a wrapped MARL env
+still satisfies the MARL protocols.
+"""
+
 from dataclasses import replace
-from typing import Any, Generic, Protocol, TypeVar
+from typing import Any, Generic
 
 import jax
-from jaxtyping import Array, Bool, PRNGKeyArray
+from jaxtyping import Array, Bool, PRNGKeyArray, PyTree
 
-from .core import MARLState, State
-from .spaces import Space
-
-# Same state type in, same state type out, bound to the wrapped env at construction
-StateT = TypeVar("StateT", bound=State | MARLState)
-
-
-class EnvLike(Protocol[StateT]):
-    """Structural env protocol binding a wrapper to its environment's state type."""
-
-    @property
-    def action_space(self) -> Space: ...
-
-    @property
-    def observation_space(self) -> Space: ...
-
-    def reset(self, *, key: PRNGKeyArray) -> StateT: ...
-    def step(self, state: StateT, action: Any) -> StateT: ...
+from .core import Env, StateT
 
 
 class Wrapper(Generic[StateT]):
     """Base wrapper. Subclass this to create custom wrappers."""
 
-    def __init__(self, env: EnvLike[StateT]) -> None:
+    num_agents: int
+
+    def __init__(self, env: Env[StateT]) -> None:
         self.env = env
         self.action_space = env.action_space
         self.observation_space = env.observation_space
+        self.num_agents = getattr(env, "num_agents", 1)
 
-    def reset(self, *, key: PRNGKeyArray) -> StateT:
-        return self.env.reset(key=key)
+    def reset(self, *, key: PRNGKeyArray, **kwargs: Any) -> StateT:
+        return self.env.reset(key=key, **kwargs)
 
-    def step(self, state: StateT, action: Array) -> StateT:
+    def step(self, state: StateT, action: PyTree) -> StateT:
         return self.env.step(state, action)
 
     def __getattr__(self, name: str) -> Any:
+        """Forward unknown attributes to the wrapped env."""
         env = self.__dict__.get("env")
         if env is not None:
             return getattr(env, name)
@@ -50,7 +48,7 @@ class VmapWrapper(Wrapper[StateT]):
 
     Parameters
     ----------
-    env : EnvLike
+    env : Env
         The environment to vectorise.
     num_envs : int
         Number of parallel environments.
@@ -66,7 +64,7 @@ class VmapWrapper(Wrapper[StateT]):
     >>> state = env.reset(key=jax.random.key(1), state=state, done=state.done)
     """
 
-    def __init__(self, env: EnvLike[StateT], num_envs: int) -> None:
+    def __init__(self, env: Env[StateT], num_envs: int) -> None:
         super().__init__(env)
         self.num_envs = num_envs
 
@@ -81,6 +79,7 @@ class VmapWrapper(Wrapper[StateT]):
 
         When `state` and `done` are omitted, all environments are reset.
         When both are provided, only environments where `done=True` are reset.
+        Providing one without the other raises a `ValueError`.
 
         Parameters
         ----------
@@ -96,6 +95,9 @@ class VmapWrapper(Wrapper[StateT]):
         State
             Batched state with leading dim `num_envs` on all leaves.
         """
+        if (state is None) != (done is None):
+            raise ValueError("Selective reset requires both `state` and `done`")
+
         keys = jax.random.split(key, self.num_envs)
         reset_state = jax.vmap(self.env.reset)(key=keys)
 
@@ -108,15 +110,15 @@ class VmapWrapper(Wrapper[StateT]):
             state,
         )
 
-    def step(self, state: StateT, action: Array) -> StateT:
+    def step(self, state: StateT, action: PyTree) -> StateT:
         """Step all environments in parallel.
 
         Parameters
         ----------
         state : State
             Batched state with leading dim `num_envs`.
-        action : Array
-            Batched actions with leading dim `num_envs`.
+        action : PyTree
+            Batched actions with leading dim `num_envs` on all leaves.
 
         Returns
         -------
@@ -129,7 +131,7 @@ class VmapWrapper(Wrapper[StateT]):
 class AutoResetWrapper(Wrapper[StateT]):
     """Automatically resets the environment when an episode ends."""
 
-    def step(self, state: StateT, action: Array) -> StateT:
+    def step(self, state: StateT, action: PyTree) -> StateT:
         state = self.env.step(state, action)
         key, reset_key = jax.random.split(state.key)
         reset_state = self.env.reset(key=reset_key)
@@ -140,10 +142,10 @@ class AutoResetWrapper(Wrapper[StateT]):
 class TimeLimit(Wrapper[StateT]):
     """Truncates episodes that exceed a maximum number of steps."""
 
-    def __init__(self, env: EnvLike[StateT], max_steps: int) -> None:
+    def __init__(self, env: Env[StateT], max_steps: int) -> None:
         super().__init__(env)
         self.max_steps = max_steps
 
-    def step(self, state: StateT, action: Array) -> StateT:
+    def step(self, state: StateT, action: PyTree) -> StateT:
         state = self.env.step(state, action)
         return replace(state, truncation=state.truncation | (state.step_count >= self.max_steps))

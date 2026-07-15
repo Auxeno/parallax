@@ -13,12 +13,12 @@
 
 ## Why Parallax?
 
-JAX RL environments need pure functions and immutable state, but there's no standard for what that looks like. Parallax defines a minimal `reset`/`step` contract so any environment exposes the same interface.
+JAX RL environments need pure functions and immutable state, but there is no standard interface for them. Parallax defines a minimal `reset`/`step` contract so agents, wrappers and training loops work with any environment that follows it.
 
-- **For JAX RL users**: Write agents, experience collection, and training loops once. Swap environments without changing your code.
-- **For Gymnasium users**: The same familiar concepts (reset, step, observation, reward) rebuilt for JAX. Pure functions instead of mutable objects, so everything works with `jit`, `vmap`, and `scan`.
+- **For JAX RL users**: write agents, rollouts and training loops once, swap environments without changing code
+- **For Gymnasium users**: the same concepts (`reset`, `step`, observation, reward) as pure functions, so everything works with `jit`, `vmap` and `scan`
 
-Protocol, not a framework. No base class, no registration.
+Parallax is a protocol, not a framework. No base class, no registration: an environment satisfies the protocol by having the right methods.
 
 ## Install
 
@@ -48,13 +48,13 @@ for _ in range(200):
         break
 ```
 
-## How It Works
+## The Protocol
 
-RL environments are conventionally stateful (Gymnasium, PettingZoo, etc.). Calling `env.step()` mutates the environment in place. JAX needs pure functions and immutable data, so Parallax splits things in two:
+Conventional RL environments are stateful: `env.step()` mutates the environment in place. JAX needs pure functions and immutable data, so Parallax splits the two:
 
-**Env** is stateless. It has two pure functions (`reset` and `step`) with no internal state.
+**Env** is stateless. It has two pure functions, `reset` and `step`, and no internal state.
 
-**State** is a JAX pytree that holds all the data. Every call to `reset` or `step` returns a new State with precomputed fields:
+**State** is a JAX pytree that holds all the data. Every call to `reset` or `step` returns a new one:
 
 ```python
 state = env.reset(key=jax.random.key(0))
@@ -71,11 +71,9 @@ state.step_count   # current timestep
 state.key          # JAX RNG key
 ```
 
-State is pure data. All values are computed in `reset`/`step` and stored directly.
-
 ## Building an Environment
 
-Implement `reset` and `step`. Each returns a `State` with all fields computed:
+Implement `reset` and `step`, each returning a `State` with all fields computed:
 
 ```python
 import jax
@@ -125,38 +123,37 @@ class GridWorld:
         )
 ```
 
-`env_state` is your raw environment data and can be any JAX pytree. The other fields (`observation`, `reward`, etc.) are derived from it in `reset`/`step`.
-
-For multi-agent environments, Parallax has a dedicated protocol. See [Multi-Agent Environments](#multi-agent-environments).
+`env_state` is your raw environment data and can be any JAX pytree. The other fields are derived from it in `reset` and `step`.
 
 ## Wrappers
 
 Wrappers compose to add functionality:
 
 ```python
-from parallax import AutoResetWrapper, TimeLimit, VmapWrapper
+from parallax import TimeLimit, VmapWrapper
 
-num_envs = 128
-env = VmapWrapper(AutoResetWrapper(TimeLimit(GridWorld(), max_steps=200)), num_envs=num_envs)
+env = VmapWrapper(TimeLimit(GridWorld(), max_steps=200), num_envs=128)
 state = env.reset(key=jax.random.key(0))
 state = env.step(state, actions)
-```
 
-For manual resets (e.g. when you need terminal observations for value bootstrapping):
-
-```python
-env = VmapWrapper(TimeLimit(GridWorld(), max_steps=200), num_envs=num_envs)
-state = env.step(state, actions)
+# Terminal observations are still in state, reset only the finished envs
 state = env.reset(key=reset_key, state=state, done=state.done)
 ```
 
+- `VmapWrapper` steps `num_envs` environments in parallel with `jax.vmap` and adds selective reset
+- `TimeLimit` truncates episodes after `max_steps`
+- `AutoResetWrapper` restarts episodes as they end, replacing terminal observations with reset ones
+- `Wrapper` is the base class for custom wrappers
+
+Selective reset (`state=`, `done=`) keeps terminal observations available for value bootstrapping. The arguments pass through wrapper stacks to the vector env inside.
+
+Wrappers forward unknown attributes to the wrapped env at runtime. Statically visible are the spaces, `num_agents` and, on `VmapWrapper`, `num_envs`.
+
 ## Multi-Agent Environments
 
-Multi-agent APIs typically conflate two different things: the episode ending and an individual agent dying. Parallax keeps them separate. `MARLState` keeps termination and truncation as episode-level scalars and tracks per-agent lifecycle with an `active` mask:
+Parallax separates two events that multi-agent code must treat differently: the episode ending and an individual agent dying. `MARLState` keeps `termination` and `truncation` as episode-level scalars and tracks per-agent lifecycle with an `active` mask:
 
 ```python
-from parallax import MARLEnv, MARLState, Agents
-
 state.env_state           # raw environment data (any pytree)
 state.termination         # the MDP ended naturally
 state.truncation          # the MDP was cut short
@@ -169,7 +166,7 @@ state.agents.action_mask  # per-agent legal actions, or None
 state.global_observation  # full-state view for centralised critics, or None
 ```
 
-Agents occupy array slots `0..num_agents - 1` and are shape-homogeneous: `action_space` and `observation_space` describe a single agent's space, and per-agent data stacks on a leading `num_agents` dimension. Heterogeneous agents pad to the largest shape and express legality through `action_mask`.
+Agents occupy slots `0..num_agents - 1` and are shape-homogeneous: per-agent data stacks on a leading `num_agents` dimension, and `action_space`/`observation_space` describe that stacked view, built from a per-agent space with `stack_space`. Heterogeneous agents pad to the largest shape and express legality through `action_mask`.
 
 The contract environments implement:
 
@@ -188,7 +185,7 @@ state_1 = env.step(state_0, actions_0)
 # state_1.agents.reward  pairs with state_0.agents.active
 ```
 
-Everything a learning algorithm needs is a one-liner from these fields, nothing is stored twice:
+Everything a learning algorithm needs is a one-liner from these fields:
 
 ```python
 valid = state_t.agents.active                               # transition is real, use it in the loss
@@ -196,15 +193,69 @@ bootstrap = state_t1.agents.active & ~state_t1.termination  # died or terminated
 rewards = state_t1.agents.reward                            # pairs with state_t.agents.active
 ```
 
-An agent that dies on the step the episode truncates composes correctly with no special casing: it stops bootstrapping through `active`, while surviving agents bootstrap from the terminal observation.
+An agent that dies on the step the episode truncates needs no special casing: it stops bootstrapping through `active` while surviving agents bootstrap from the terminal observation.
 
-Teams are not a protocol concept, slots are. Competitive and team tasks broadcast each team's reward to its members' slots in `agents.reward`: all slots equal is fully cooperative, `+1`/`-1` across two blocks of slots is two-team zero-sum. A team critic reads its own members' slots, and team membership itself is environment metadata (subclass `Agents` to expose it, see [Custom Properties](#custom-properties)). There is no MDP-level reward field, the shared scalar in cooperative tasks is simply the value at any active slot.
+Teams are not a protocol concept, slots are. Broadcast each team's reward to its members' slots in `agents.reward`: all slots equal is fully cooperative, `+1`/`-1` across two blocks of slots is two-team zero-sum. Team membership is environment metadata, subclass `Agents` to expose it.
 
-Because the episode-level fields match the single-agent `State`, wrappers like `TimeLimit` and `VmapWrapper` work on multi-agent environments unchanged.
+The episode-level fields match the single-agent `State`, so wrappers like `TimeLimit` and `VmapWrapper` work on multi-agent environments unchanged.
+
+### Building a Multi-Agent Environment
+
+Three agents race to position 10. An agent that finishes becomes inactive, and the episode terminates when all have finished:
+
+```python
+import jax
+import jax.numpy as jnp
+from jaxtyping import Array, PRNGKeyArray
+from parallax import Agents, MARLState, Space, spaces, stack_space
+
+
+class Race:
+    num_agents = 3
+    action_space: Space = stack_space(spaces.Discrete(2), num_agents)
+    observation_space: Space = stack_space(spaces.Box(0.0, 10.0, ()), num_agents)
+
+    def reset(self, *, key: PRNGKeyArray) -> MARLState:
+        positions = jnp.zeros(self.num_agents)
+        return MARLState(
+            env_state=positions,
+            agents=Agents(
+                observation=positions,
+                active=jnp.ones(self.num_agents, dtype=bool),
+                reward=jnp.zeros(self.num_agents),
+            ),
+            termination=jnp.bool_(False),
+            truncation=jnp.bool_(False),
+            info={},
+            step_count=jnp.int32(0),
+            key=key,
+        )
+
+    def step(self, state: MARLState, action: Array) -> MARLState:
+        acted = state.agents.active
+        positions = state.env_state + action * acted       # inactive actions are ignored
+        active = positions < 10.0                          # finished agents become inactive
+        finished_now = acted & ~active
+        return MARLState(
+            env_state=positions,
+            agents=Agents(
+                observation=jnp.where(active, positions, 0.0),  # zeros for inactive agents
+                active=active,
+                reward=jnp.where(finished_now, 1.0, 0.0),       # the finishing step carries reward
+            ),
+            termination=~active.any(),
+            truncation=jnp.bool_(False),
+            info={},
+            step_count=state.step_count + 1,
+            key=state.key,
+        )
+```
+
+The spaces lead with `num_agents` (`action_space.shape == (3,)`), inactive slots are masked out of the transition and zeroed in observations and rewards, and the environment sets `termination` itself when the last agent finishes.
 
 ## Adapters
 
-Use existing JAX RL environments with Parallax via adapters:
+Use existing JAX RL environments through adapters:
 
 ```python
 import gymnax
@@ -230,11 +281,11 @@ env = MJXAdapter(registry.load("HumanoidWalk", config_overrides={"impl": "jax"})
 env = VmapWrapper(env, num_envs=128)
 ```
 
-Adapters map foreign reset/step APIs to the Parallax protocol. Brax and MJX adapters extract episode length from the underlying environment and handle truncation internally. Brax's built-in auto-reset is stripped automatically to preserve terminal observations.
+Adapters map foreign reset/step APIs to the Parallax protocol. Brax and MJX adapters read the episode length from the wrapped environment and set `truncation` themselves, and Brax's built-in auto-reset is stripped to preserve terminal observations. Gymnax does not distinguish truncation from termination, so all episode endings are reported as `termination`.
 
-## Custom Properties
+## Custom State Fields
 
-Subclass `State` to add extra fields. For example, adding an action mask to `GridWorld`:
+Subclass `State` to add fields. For example, an action mask:
 
 ```python
 from dataclasses import dataclass
@@ -245,7 +296,7 @@ class MaskedState(State):
     action_mask: Bool[Array, "4"]
 ```
 
-Then return `MaskedState` from your env's `reset` and `step`:
+Return it from your env's `reset` and `step`:
 
 ```python
 class MaskedGridWorld(GridWorld):
@@ -260,9 +311,11 @@ class MaskedGridWorld(GridWorld):
 state.action_mask  # fully typed, works with jit/vmap/wrappers
 ```
 
+The protocols are generic in the state type: this env satisfies `Env[MaskedState]`, wrappers preserve the state type, and `state.action_mask` stays visible to type checkers through a full wrapper stack. Bare `Env` means `Env[State]`. The same pattern applies to `MARLState` and `Agents`.
+
 ## Collecting Experience
 
-Use `jax.lax.scan` for vectorized rollouts. Manual resets let you capture terminal observations before resetting done environments, which is needed for value bootstrapping:
+Use `jax.lax.scan` for vectorised rollouts. Selective resets capture terminal observations before resetting finished environments, which value bootstrapping needs:
 
 ```python
 from dataclasses import dataclass
@@ -276,7 +329,7 @@ class Experience:
     action: jax.Array
     reward: jax.Array
     termination: jax.Array
-    
+
 num_envs = 128
 env = VmapWrapper(GridWorld(), num_envs=num_envs)
 
@@ -321,11 +374,13 @@ Parallax trusts environments to follow the protocol. Nothing is validated at run
 - **`step_count` powers `TimeLimit`.** Environments must increment it every step or wrapped truncation never fires.
 - **Termination and truncation are distinct on purpose.** Bootstrapping value targets from the terminal observation is correct on truncation and wrong on termination. `done` alone is not enough to write a correct update, it only tells you the episode ended.
 - **Stepping a done state is undefined by the protocol.** Environments are not required to freeze or reset themselves. Reset instead, selective reset via `VmapWrapper` keeps terminal observations available first.
-- **Shapes widen under `VmapWrapper`.** A scalar `reward` becomes `(num_envs,)` and multi-agent `(num_agents,)` fields become `(num_envs, num_agents)`. The `...` in the field annotations is that batch dimension.
+- **Shapes widen under `VmapWrapper`, spaces do not.** A scalar `reward` becomes `(num_envs,)` and multi-agent `(num_agents,)` fields become `(num_envs, num_agents)`, but the spaces keep describing the unbatched environment.
+- **Wrapper attribute forwarding is runtime-only.** Statically, wrappers expose the spaces, `num_agents` and `num_envs`. Anything else reached through a wrapper resolves via `__getattr__` and types as `Any`.
 
 **Multi-agent**
 
 - **The agent count is static.** `num_agents` is a trace-time constant and an upper bound. Agents can die, and the protocol does not forbid re-activation (respawns), but the slot count never changes.
+- **Spaces lead with `num_agents`.** Per-agent network sizes come from the trailing dims: `observation_space.shape[-1]` for features, `Discrete.n` for action count.
 - **The reward/active pairing is off by one by design.** Rewards in the state returned by `step` pair with the `active` mask of the state passed in. Scan-collected trajectories must respect this, see the timing diagram above.
 - **There is no MDP-level reward.** `agents.reward` is the only reward signal, shared team rewards are broadcast to active slots. Because inactive slots are zeros, extracting the team scalar is not `agents.reward[0]` (slot 0 may be dead), use the active mask consumers already carry: `rewards[jnp.argmax(active_t)]`.
 - **Nothing is zeroed for you at training time.** The environment zeros observations and rewards of inactive slots, but masking learning updates and bootstrapping with `active` is the consumer's job.

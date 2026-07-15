@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import pytest
 
 from conftest import assert_trees_close, assert_trees_equal
 from parallax.core import State
@@ -141,6 +142,26 @@ class TestVmapWrapper:
 
         assert new_state.env_state[0] == 0.0  # reset
         assert jnp.array_equal(new_state.env_state[1:], old_state_values[1:])
+
+    def test_selective_reset_requires_both_args(self):
+        """Passing only one of state/done is an error, not a silent full reset."""
+        env = VmapWrapper(_ScalarEnv(), num_envs=4)
+        state = env.reset(key=jax.random.key(0))
+        with pytest.raises(ValueError, match="state.*done"):
+            env.reset(key=jax.random.key(1), state=state)
+        with pytest.raises(ValueError, match="state.*done"):
+            env.reset(key=jax.random.key(1), done=state.done)
+
+    def test_selective_reset_through_wrapper_stack(self):
+        """Wrappers forward selective reset kwargs to the vector env inside."""
+        env = TimeLimit(VmapWrapper(_ScalarEnv(), num_envs=4), max_steps=5)
+        state = env.reset(key=jax.random.key(0))
+        state = env.step(state, jnp.zeros(4, dtype=jnp.int32))
+
+        done = jnp.array([True, False, True, False])
+        state = env.reset(key=jax.random.key(1), state=state, done=done)
+        assert state.step_count[0] == 0
+        assert state.step_count[1] == 1
 
     def test_forwards_spaces(self):
         base = _ScalarEnv()
@@ -373,6 +394,19 @@ class TestTimeLimit:
         for _ in range(3):
             state = env.step(state, actions)
         assert jnp.all(state.truncation)
+
+
+class TestProtocolAttributes:
+    """Wrappers expose the protocol attributes of the env they wrap."""
+
+    def test_sarl_wrappers_report_one_agent(self):
+        assert TimeLimit(_ScalarEnv(), max_steps=5).num_agents == 1
+        assert AutoResetWrapper(_ScalarEnv()).num_agents == 1
+
+    def test_num_agents_and_num_envs_through_stack(self):
+        env = VmapWrapper(TimeLimit(_ScalarEnv(), max_steps=5), num_envs=4)
+        assert env.num_agents == 1
+        assert env.num_envs == 4
 
 
 class TestSubclassedState:

@@ -1,3 +1,11 @@
+"""Action and observation space descriptions.
+
+- `Space`: structural protocol, anything with `shape` and `sample`
+- `Discrete` / `Box` / `MultiDiscrete` / `MultiBinary`: standard array spaces
+- `PyTreeSpace`: an arbitrary pytree of spaces
+- `stack_space`: copy a space with a leading dim, per-agent to stacked MARL
+"""
+
 from dataclasses import dataclass
 from typing import Protocol
 

@@ -244,6 +244,11 @@ class TestWrappers:
             state = env.step(state, jnp.ones((4, 3), dtype=jnp.int32))
         assert jnp.all(state.truncation)
 
+    def test_num_agents_forwards_through_stack(self):
+        env = VmapWrapper(TimeLimit(LastAgentStandingEnv(), max_steps=4), num_envs=4)
+        assert env.num_agents == 3
+        assert env.num_envs == 4
+
 
 class TestPytree:
     def test_jit_step(self):
